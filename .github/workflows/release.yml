@@ -1,0 +1,48 @@
+name: Release
+
+# 打 tag 自动发版：git tag vX.Y.Z && git push origin vX.Y.Z
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish single-file
+        shell: pwsh
+        run: ./publish.ps1
+
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          $hash = Get-FileHash -Algorithm SHA256 ./publish/WinNetFix.exe
+          "WinNetFix.exe  $($hash.Hash)" | Set-Content ./publish/SHA256.txt
+
+      - name: Show artifact info
+        shell: pwsh
+        run: |
+          $exe = Get-Item ./publish/WinNetFix.exe
+          Write-Host "exe: $($exe.Length) bytes"
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            publish/WinNetFix.exe
+            publish/SHA256.txt
+          draft: true
+          generate_release_notes: true

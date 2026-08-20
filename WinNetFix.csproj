@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>WinNetFix</AssemblyName>
+    <RootNamespace>WinNetFix</RootNamespace>
+    <Version>0.1.0</Version>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <!-- 注意：不能开 InvariantGlobalization，否则 CodePagesEncodingProvider 无法提供 GBK/936，
+         导致 netsh 中文输出解码失败（TypeInitializationException） -->
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <!-- 防止裁剪掉代码页编码（GBK/936），否则 netsh 中文输出无法解码 -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="System.Text.Encoding.CodePages" />
+  </ItemGroup>
+
+</Project>

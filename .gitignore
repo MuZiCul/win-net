@@ -1,0 +1,21 @@
+# Build results
+bin/
+obj/
+*.user
+
+# Publish output
+publish/
+
+# Test artifacts
+test-logs/
+config-test.json
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vs/
+
+# CodeBuddy internal memory (不提交工作记忆)
+.codebuddy/
