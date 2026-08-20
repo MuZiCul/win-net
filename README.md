@@ -54,6 +54,28 @@ WinNetFix.exe --wifi-on
 WinNetFix.exe --wifi-off
 ```
 
+### 开机自启 / Auto-start on boot
+
+> **注册前请确认**：自启用的是**当前路径的 exe**，注册后该文件不可移动/删除，否则自启会失败。/ The scheduled task points to the current exe path — do NOT move or delete it after install.
+
+```powershell
+# 1. 注册开机自启（登录时以最高权限运行，无需再弹 UAC）
+#    Register auto-start (runs at logon with highest privileges, no further UAC)
+WinNetFix.exe --install
+
+# 2. 查看任务状态 / Verify
+schtasks /Query /TN "WinNetFix" /V /FO LIST
+
+# 3. 移除开机自启 / Remove auto-start
+WinNetFix.exe --uninstall
+# 或手动删除 / or manually:
+schtasks /Delete /TN "WinNetFix" /F
+```
+
+- 注册后**重新登录/重启**即自动后台运行，日志写入 `%ProgramData%\WinNetFix\logs\`。
+- 若把 exe 移到新位置，需先 `--uninstall` 再在新路径 `--install`。
+- 任务名固定为 `WinNetFix`，以当前用户（需管理员权限）登录时运行。
+
 ### 配置文件 / Configuration
 
 默认路径：`%ProgramData%\WinNetFix\config.json`（首次运行自动生成）。
@@ -141,6 +163,27 @@ WinNetFix.exe --status       # show network status (read-only, no elevation)
 WinNetFix.exe --wifi-on      # turn WiFi radio on
 WinNetFix.exe --wifi-off     # turn WiFi radio off
 ```
+
+### Auto-start on boot
+
+> The scheduled task points to the **current exe path** — do NOT move or delete the exe after install.
+
+```powershell
+# Register auto-start (runs at logon with highest privileges)
+WinNetFix.exe --install
+
+# Verify
+schtasks /Query /TN "WinNetFix" /V /FO LIST
+
+# Remove auto-start
+WinNetFix.exe --uninstall
+# or manually:
+schtasks /Delete /TN "WinNetFix" /F
+```
+
+- After install, the tool auto-runs at next logon/reboot; logs go to `%ProgramData%\WinNetFix\logs\`.
+- If you move the exe, run `--uninstall` first, then `--install` from the new path.
+- The task name is fixed as `WinNetFix` (runs as current admin user at logon).
 
 ### Behavior & Limitations
 
