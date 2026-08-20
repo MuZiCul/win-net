@@ -1,8 +1,8 @@
 # Win 网络修复工具 — 技术设计文档
 
-> 版本：v1.0-draft
+> 版本：v0.1.0（对应 Release v0.1.0）
 > 日期：2026-08-20
-> 状态：设计稿（待评审）
+> 状态：已实施并发布（含 WiFi 开关 WLAN API 详细技术）
 
 ---
 
@@ -208,21 +208,58 @@ netsh interface set interface name="<name>" admin=enable
 
 ### 5.2 WiFi 例行守护（Monitoring 每次 tick 执行）
 与有线状态无关，每个监测周期都检查；未连接（含软件开关 Software Off）才主动打开并连接，已连接则跳过。
+
+#### 5.2.1 状态检测（`WlanManager.CheckWifi`）
 ```cmd
-:: 1. 查当前无线状态（chcp 65001 下输出为英文标签）
 netsh wlan show interfaces
-::    State = connected → 跳过；Radio status = Software Off → 需先打开无线
-
-:: 2. 软件关闭 → 打开无线（先启用接口，再开 WLAN AutoConfig）
-netsh interface set interface name="WLAN" admin=enable
-netsh wlan set autoconfig enabled=yes interface="WLAN"
-
-:: 3. 用已存 profile 连接（name 通常等于 SSID；preferredSsid 为空则用最后连接 SSID，再退化为首个 profile）
-netsh wlan connect name="<SSID>"
 ```
-- **打开无线开关**：`Radio status = Software Off` 时必须先执行第 2 步；`Hardware Off`（飞行模式）无法软件开启，仅记录。
-- profile 不存在/密码失效 → 记 Warn 后跳过（不进入有线修复流程，二者解耦）；连接失败进入冷却期（默认 60s，可配 `wifiRetryCooldownSec`）避免反复尝试。
-- 连接后等待 `8s` 再用 `netsh wlan show interfaces` 校验 `State = connected`。
+- `State = connected` → 已连接，跳过本周期。
+- `Radio status: Hardware On / Software Off` → 软件开关关闭，需先打开（见 5.2.2）。
+- `Radio status: Hardware Off` → **飞行模式**，系统锁定，软件无法打开，Warn 提示手动开启。
+- `There is no wireless interface` / wlansvc 未运行 → 无无线能力，跳过。
+> 注意：netsh 在中文系统输出本地化标签，工具统一经 `chcp 65001` 管道强制英文标签（见 ProcessRunner）。
+
+#### 5.2.2 打开/关闭 WiFi 软件开关（核心：必须用 WLAN API，netsh 打不开）
+**关键技术结论**（实测验证）：
+- `netsh interface set interface admin=enable` 只能启用接口层，**无法改变 radio 软开关（Software Off）**。
+- `netsh wlan set autoconfig enabled=yes` 同样打不开 Software Off。
+- Windows 的 `Software Off` 是 wlansvc 管理的 radio 电源状态，**必须通过 `wlanapi.dll` 的 `WlanSetInterface` + `wlan_intf_opcode_radio_state` 设置**。
+
+**P/Invoke 实现要点**（`WlanApi.cs`，参照 `emoacht/ManagedNativeWifi`）：
+```
+opcode  wlan_intf_opcode_radio_state = 4            （不是 0x1000000D！）
+```
+- **查询状态** `WlanQueryInterface`：返回 `WLAN_RADIO_STATE` =
+  `dwNumberOfPhys(4)` + N × `WLAN_PHY_RADIO_STATE(12)`；
+  每 PHY 12 字节 = `{dwPhyIndex(4), dot11SoftwareRadioState(4), dot11HardwareRadioState(4)}`。
+  任一 PHY 的 `dot11SoftwareRadioState == 1(On)` 即视为开关开。
+- **设置状态** `WlanSetInterface`：**必须传单个 `WLAN_PHY_RADIO_STATE`（12 字节）**，
+  结构 `{dwPhyIndex=0, dot11SoftwareRadioState=On/Off, dot11HardwareRadioState=0}`；
+  **绝不能传整个 PHY 数组**（否则返回 `ERROR_INVALID_PARAMETER (87)`）。
+- 接口匹配：`WlanEnumInterfaces` 返回的列表头 `{dwNumberOfItems(4), dwIndex(4)}`（共 8 字节），
+  数组从偏移 8 开始；匹配用**接口描述名**（如 `Intel(R) Dual Band Wireless-AC 3165`），
+  而非 netsh 接口名（`WLAN`）。
+- 需管理员权限；`ERROR_NOT_SUPPORTED (50)` 表示驱动不支持（换 netsh 回退）。
+
+```csharp
+// 打开：SetRadioState(iface, on: true)
+var buf = new byte[12];
+BitConverter.GetBytes(0u).CopyTo(buf, 0);          // dwPhyIndex = 0
+BitConverter.GetBytes(on ? 1u : 2u).CopyTo(buf, 4); // dot11SoftwareRadioState: 1=On, 2=Off
+BitConverter.GetBytes(0u).CopyTo(buf, 8);          // dot11HardwareRadioState = 0
+WlanSetInterface(h, ref guid, 4, 12, bufPtr, IntPtr.Zero);
+```
+
+#### 5.2.3 连接流程（`EnsureWifiUp`）
+```cmd
+:: 1. 若 Software Off → WlanApi.SetRadioState(iface, on:true) 打开开关
+::    （netsh 无法做到，必须用 WLAN API）
+:: 2. 确定目标 SSID：preferredSsid → 最后连接 SSID → 首个 profile
+netsh wlan connect name="<SSID>"
+:: 3. 等待 8s，校验 State = connected；失败进冷却期（wifiRetryCooldownSec，默认 60s）
+```
+- 打开开关后必须**复检** `Software Off` 是否消除；未消除则**不再尝试连接**（radio 关着连不上），明确 Warn 提示手动开。
+- profile 不存在/密码失效 → 记 Warn 后跳过（不进入有线修复流程，二者解耦）。
 - **不主动切回有线**：WiFi 连上后保持双连接，工具不再干预无线。
 
 ### 5.3 分层探测（ProbeLayer 内部，仅限有线）
