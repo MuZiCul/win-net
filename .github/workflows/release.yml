@@ -25,24 +25,39 @@ jobs:
         shell: pwsh
         run: ./publish.ps1
 
+      - name: Extract version from tag
+        shell: pwsh
+        id: version
+        run: |
+          # 从 tag 提取版本（v0.1.2 → 0.1.2），并生成带版本的文件名
+          $tag = "${env:GITHUB_REF}" -replace '^refs/tags/', ''
+          $ver = $tag.TrimStart('v')
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "asset_name=WinNetFix-$tag.exe" >> $env:GITHUB_OUTPUT
+          Write-Host "tag=$tag ver=$ver"
+
+      - name: Rename exe with version
+        shell: pwsh
+        run: |
+          $src = './publish/WinNetFix.exe'
+          $dst = "./publish/${{ steps.version.outputs.asset_name }}"
+          Rename-Item $src $dst -Force
+          Get-Item $dst | Select-Object Name, Length
+
       - name: Generate SHA256
         shell: pwsh
         run: |
-          $hash = Get-FileHash -Algorithm SHA256 ./publish/WinNetFix.exe
-          "WinNetFix.exe  $($hash.Hash)" | Set-Content ./publish/SHA256.txt
-
-      - name: Show artifact info
-        shell: pwsh
-        run: |
-          $exe = Get-Item ./publish/WinNetFix.exe
-          Write-Host "exe: $($exe.Length) bytes"
+          $asset = "./publish/${{ steps.version.outputs.asset_name }}"
+          $hash = Get-FileHash -Algorithm SHA256 $asset
+          "${{ steps.version.outputs.asset_name }}  $($hash.Hash)" | Set-Content ./publish/SHA256.txt
+          Get-Content ./publish/SHA256.txt
 
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            publish/WinNetFix.exe
+            publish/${{ steps.version.outputs.asset_name }}
             publish/SHA256.txt
           draft: true
           generate_release_notes: true

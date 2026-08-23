@@ -28,7 +28,7 @@ dotnet build -c Debug
 
 # 单文件发布（self-contained，免装 .NET）/ Publish single-file
 .\publish.ps1
-# 产物在 publish/WinNetFix.exe
+# 产物在 publish/WinNetFix.exe（固定名）与 publish/WinNetFix-vX.Y.Z.exe（带版本号）
 ```
 
 ### 用法 / Usage
@@ -151,7 +151,7 @@ Requires [.NET 8 SDK](https://dotnet.microsoft.com/download).
 
 ```powershell
 dotnet build -c Debug
-.\publish.ps1   # single-file self-contained → publish/WinNetFix.exe
+.\publish.ps1   # single-file self-contained → publish/WinNetFix.exe + publish/WinNetFix-vX.Y.Z.exe
 ```
 
 ### Usage
