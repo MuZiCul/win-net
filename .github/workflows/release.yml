@@ -66,7 +66,14 @@ jobs:
             throw "Inno Setup 下载失败或文件不完整"
           }
           Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
-          Get-Item "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" | Select-Object FullName
+          # 定位实际安装位置（管理员 runner 可能装到 Program Files，普通用户装到 LOCALAPPDATA）
+          $c = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $c) { throw "ISCC.exe 未找到（安装失败）" }
+          Get-Item $c | Select-Object FullName
 
       - name: Build Setup installer
         shell: pwsh
