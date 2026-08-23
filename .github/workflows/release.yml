@@ -59,16 +59,27 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          # 下载并静默安装 Inno Setup 6
+          # 用官方 GitHub Releases 稳定地址下载并静默安装 Inno Setup 6
           $installer = Join-Path $env:TEMP 'innosetup.exe'
-          Invoke-WebRequest -Uri 'https://jrsoftware.org/download.php/is.exe' -OutFile $installer
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $installer
+          if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 1000000) {
+            throw "Inno Setup 下载失败或文件不完整"
+          }
           Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
-          Get-Item 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' | Select-Object FullName
+          Get-Item "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" | Select-Object FullName
 
       - name: Build Setup installer
         shell: pwsh
         run: |
-          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          # 定位 ISCC.exe（兼容用户级与系统级安装）
+          $candidates = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe 未找到" }
+          Write-Host "ISCC: $iscc"
           & $iscc "./installer/WinNetFix.iss" "/DMyAppVersion=${{ steps.version.outputs.version }}"
           Get-ChildItem ./publish/WinNetFix-Setup-*.exe | Select-Object Name, Length
 
