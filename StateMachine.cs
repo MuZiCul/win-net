@@ -379,7 +379,8 @@ public sealed class StateMachine
 
         if (_escalateCount >= _config.Repair.MaxEscalate)
         {
-            _log.Error($"[StateMachine] 连续 {_escalateCount} 次失败，进入停手（Suspended），不再干预网卡。每隔 {_config.Repair.SuspendResumeHours}h 自动唤醒探测一次");
+            _log.Error($"[StateMachine] 连续 {_escalateCount} 次失败，进入停手（Suspended）。{_config.Repair.EscalateCooldownSec}s 后主动重启网卡再试（非永久停手）");
+            _lastSuspendProbe = DateTime.Now; // 停手冷却起点
             Transition(FixState.Suspended);
             return;
         }
@@ -429,23 +430,26 @@ public sealed class StateMachine
         }
     }
 
-    /// <summary>停手：不再干预网卡，仅按 SuspendResumeHours 定时唤醒探测一次，恢复则回归。</summary>
+    /// <summary>
+    /// 停手（Suspended）：暂停 intervene 一段时间（escalateCooldownSec，默认 30 分钟），
+    /// 期间不碰网卡；到点后探测，网络恢复则回归 Monitoring，仍不可用则**主动重启网卡再试**（不是永久停手）。
+    /// </summary>
     private void DoSuspended()
     {
-        // 定时唤醒探测：未到间隔则睡眠等待（用 intervalSec 控制轮询频率）
-        if ((DateTime.Now - _lastSuspendProbe).TotalHours < _config.Repair.SuspendResumeHours)
+        // 冷却期内：不干预，仅按 intervalSec 轮询等待到点
+        if ((DateTime.Now - _lastSuspendProbe).TotalSeconds < _config.Repair.EscalateCooldownSec)
         {
             Thread.Sleep(TimeSpan.FromSeconds(_config.Probe.IntervalSec));
             return;
         }
         _lastSuspendProbe = DateTime.Now;
 
-        _log.Info("[StateMachine] 停手中，定时唤醒探测一次");
+        _log.Info("[StateMachine] 停手冷却结束，唤醒检查");
         var r = _probe.Probe();
         LastProbe = r;
         if (r.AllOk)
         {
-            _log.Info("[StateMachine] 停手期间网络已恢复，回归 Monitoring");
+            _log.Info("[StateMachine] 网络已恢复，回归 Monitoring");
             _escalateCount = 0;
             _linkFailCount = 0;
             _dnsFailCount = 0;
@@ -454,7 +458,10 @@ public sealed class StateMachine
         }
         else
         {
-            _log.Debug("[StateMachine] 仍不可用，继续停手");
+            // 仍不可用：主动重启网卡再试，而非永久停手
+            _log.Warn("[StateMachine] 仍不可用，30 分钟后主动重启网卡再试");
+            _retryCount = 0;
+            Transition(FixState.RestartAdapter);
         }
     }
 

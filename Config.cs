@@ -72,14 +72,11 @@ public sealed class Config
         /// <summary>检测到 169.254（DHCP 拿不到 IP）时执行 ipconfig /release + /renew。</summary>
         public bool RenewDhcp { get; set; } = true;
 
-        /// <summary>Escalate 长冷却（秒）：连续失败后暂停这么久再回归监测，避免反复打断 DHCP。</summary>
-        public int EscalateCooldownSec { get; set; } = 600;
+        /// <summary>冷却时长（秒）：连续失败/停手后暂停这么久再重试（默认 30 分钟）。</summary>
+        public int EscalateCooldownSec { get; set; } = 1800;
 
         /// <summary>连续 Escalate 达此次数后进入停手（Suspended）。</summary>
         public int MaxEscalate { get; set; } = 3;
-
-        /// <summary>停手（Suspended）后每小时唤醒探测一次，网络恢复则自动回归。</summary>
-        public int SuspendResumeHours { get; set; } = 1;
     }
 
     public sealed class LogConfig

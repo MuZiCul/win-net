@@ -14,7 +14,7 @@
 - **WiFi 例行守护**：每个监测周期检查 WiFi，**未连接（含软件开关关闭）时自动打开开关并连接已存 SSID**；已连接则不触碰。
 - **DNS 分层诊断与修复**：网关/外网 ICMP → DNS 解析 → 应用 HTTP 分层判定；DNS 故障自动 `ipconfig /flushdns`，仍不通则临时切换以太网 IPv4 到公共 DNS（8.8.8.8 / 223.5.5.5，不改回）。
 - **169.254 DHCP 修复**：检测到只有自动私有地址（DHCP 未拿到 IP）时强制 `ipconfig /release + /renew`，**不重启网卡**（重启无效且打断 DHCP）。
-- **防抖防死循环**：重启网卡后等待 DHCP 完成（20s）再确认；连续失败进入长冷却（10 分钟），多次仍失败则**停手**（每小时唤醒探测一次，恢复自动回归）。
+- **防抖防死循环**：重启网卡后等待 DHCP 完成（20s）再确认；连续失败进入长冷却（30 分钟）；多次仍失败则**停手 30 分钟后再主动重启网卡重试**，直到恢复（非永久停手）。
 - **应用层故障不误修**：链路/DNS 正常但 HTTP 被拦（SSL/防火墙）时不做无意义重启，仅记录观察。
 - **UAC 自动提权**：需要管理员权限时自动弹窗提权重启，无需手动右键。
 
@@ -141,7 +141,7 @@ A background, zero-dependency, low-footprint Windows network self-heal tool. Pri
 - **WiFi routine guard**: checks WiFi every cycle; **auto-turns-on the radio and connects to a saved SSID when disconnected (including Software Off)**; leaves it untouched when connected.
 - **Layered DNS diagnosis & repair**: gateway/WAN ICMP → DNS resolution → app HTTP; DNS fault auto-runs `ipconfig /flushdns`, falls back to switching Ethernet IPv4 to public DNS (8.8.8.8 / 223.5.5.5, not reverted).
 - **169.254 DHCP repair**: on APIPA address (DHCP failed), forces `ipconfig /release + /renew`; does NOT restart the adapter (which would break DHCP).
-- **Anti-thrash & stop guard**: waits for DHCP (20s) before confirming recovery; after repeated failures enters a long cooldown (10 min), then stops intervening entirely (probes hourly, auto-recovers when network returns).
+- **Anti-thrash & stop guard**: waits for DHCP (20s) before confirming recovery; after repeated failures enters a long cooldown (30 min); on persistent failure pauses for 30 min, then **actively restarts the adapter and retries** until recovered (not a permanent stop).
 - **No false repair on app-layer faults**: when link/DNS are fine but HTTP is blocked (SSL/firewall), no pointless restart; only logs.
 - **Auto UAC elevation**: auto restarts with admin rights when needed.
 

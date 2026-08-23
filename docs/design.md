@@ -1,6 +1,6 @@
 # Win 网络修复工具 — 技术设计文档
 
-> 版本：v0.1.1（对应 Release v0.1.1）
+> 版本：v0.1.2（对应 Release v0.1.2）
 > 日期：2026-08-23
 > 状态：已实施并发布（含 WiFi 开关 WLAN API 详细技术、169.254 DHCP 修复、停手策略）
 
@@ -81,9 +81,8 @@
     "adapterMatch": "auto",        // auto / 按名称正则
     "maxRetry": 3,
     "backoffSec": [5, 15, 30],
-    "escalateCooldownSec": 600,    // Escalate 长冷却（10 分钟）
-    "maxEscalate": 3,              // 连续 Escalate 达此数进停手
-    "suspendResumeHours": 1        // 停手后每小时唤醒探测一次
+    "escalateCooldownSec": 1800,   // 冷却时长（30 分钟）：连续失败/停手后暂停多久再重试
+    "maxEscalate": 3               // 连续 Escalate 达此数进停手
   },
   "log": {
     "level": "Info",
@@ -146,8 +145,8 @@
 | `RenewDhcp` | **169.254（DHCP 拿不到 IP）**：强制 `ipconfig /release + /renew`，**不重启网卡** |
 | `RecoverWait` | 修复后等待网络恢复（先等 IP 就绪，最多 `dhcpWaitSec`） |
 | `Healthy` | 修复成功，回归 Monitoring |
-| `Escalate` | 连续失败**长冷却**（`escalateCooldownSec`，默认 10 分钟），累计达 `maxEscalate` 进 Suspended |
-| `Suspended` | **停手**：不再干预网卡，仅每 `suspendResumeHours` 唤醒探测一次，恢复则回归 |
+| `Escalate` | 连续失败**长冷却**（`escalateCooldownSec`，默认 30 分钟），累计达 `maxEscalate` 进 Suspended |
+| `Suspended` | **停手**：暂停干预 `escalateCooldownSec`（默认 30 分钟）；到点后探测，恢复则回归，仍不可用则**主动重启网卡再试**（非永久停手） |
 
 ### 4.2 状态转移图
 ```
@@ -177,7 +176,7 @@ Monitoring ──┬────────► LinkDown (适配器 Down) ──
                  Escalate (长冷却 escalateCooldownSec)              RecoverWait ──ok──► Healthy ──► Monitoring
                     │ 累计达 maxEscalate 次
                     ▼
-                 Suspended (停手，每 suspendResumeHours 唤醒探测，恢复则回归)
+                 Suspended (停手 escalateCooldownSec，到点重启网卡再试，恢复则回归)
 ```
 
 > 说明：
@@ -189,8 +188,8 @@ Monitoring ──┬────────► LinkDown (适配器 Down) ──
 ### 4.3 重试、退避与停手
 - 每次完整修复周期后 `retryCount++`。
 - 若 `retryCount < maxRetry`：按 `backoffSec[retryCount]` 退避后重新进入 `RestartAdapter`。
-- 超过 `maxRetry`：进入 `Escalate`，**长冷却 `escalateCooldownSec`（默认 600s）** 后重置计数回到 `Monitoring`。
-- **停手**：`Escalate` 累计 `maxEscalate`（默认 3）次后进入 `Suspended`——不再干预网卡（避免反复打断 DHCP 使故障恶化），仅每 `suspendResumeHours`（默认 1h）唤醒探测一次，网络恢复则自动回归 `Monitoring`。
+- 超过 `maxRetry`：进入 `Escalate`，**长冷却 `escalateCooldownSec`（默认 1800s/30 分钟）** 后重置计数回到 `Monitoring`。
+- **停手**：`Escalate` 累计 `maxEscalate`（默认 3）次后进入 `Suspended`——暂停干预 `escalateCooldownSec`（默认 30 分钟）避免高频打扰；到点后探测，网络恢复则自动回归 `Monitoring`，**仍不可用则主动重启网卡再试**（非永久停手），如此循环直到恢复或用户手动处理。
 - `LinkDown` 状态**不计入重试**，不重启网卡（物理断线重启无效），待链路恢复 `Up` 后自动回 `Monitoring`。
 
 ---
@@ -335,7 +334,7 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 | WiFi 例行守护 | 无线硬件关闭（飞行模式） | E303 | 记 Warn，无法软件开启 | 提示用户手动开启 |
 | 恢复确认 | 修复后仍不可达 | E400 | 进入退避重试 | 达到 maxRetry 进入 Escalate |
 | DHCP 修复 | `ipconfig /renew` 失败 / 续租后仍 169.254 | E500 | 计入重试 | 达 maxRetry → Escalate |
-| 停手 | 连续 `maxEscalate` 次失败 | E600 | 进 Suspended，不再干预网卡 | 每 `suspendResumeHours` 唤醒探测，恢复回归 |
+| 停手 | 连续 `maxEscalate` 次失败 | E600 | 进 Suspended，暂停干预 `escalateCooldownSec` | 到点主动重启网卡再试，恢复回归 |
 
 ---
 
