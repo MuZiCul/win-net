@@ -18,8 +18,6 @@ dotnet publish (Join-Path $root "WinNetFix.csproj") `
     --self-contained true `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:PublishTrimmed=true `
-    -p:TrimMode=partial `
     -o $out
 
 if ($LASTEXITCODE -ne 0) {
