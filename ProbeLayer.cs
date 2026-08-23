@@ -96,15 +96,20 @@ public sealed class ProbeLayer
             adapter?.Name, gw, adapterIp, seq);
     }
 
-    /// <summary>从 URL 提取主机名并解析，成功即视为 DNS 层健康。</summary>
+    /// <summary>从 URL 提取主机名并解析，成功即视为 DNS 层健康。带超时，避免 DNS 卡死阻塞主循环。</summary>
     private bool DnsResolveOk(string url)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(url)) return true;
             var host = new Uri(url).Host;
-            var addrs = Dns.GetHostAddresses(host);
-            return addrs != null && addrs.Length > 0;
+            // Dns.GetHostAddresses 同步阻塞且无超时，用 Task.Run + WaitAsync 限时
+            var task = Task.Run(() =>
+            {
+                var addrs = Dns.GetHostAddresses(host);
+                return addrs != null && addrs.Length > 0;
+            });
+            return task.Wait(TimeSpan.FromMilliseconds(_config.Probe.TimeoutMs)) && task.Result;
         }
         catch
         {

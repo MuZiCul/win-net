@@ -77,6 +77,12 @@ public sealed class Config
 
         /// <summary>连续 Escalate 达此次数后进入停手（Suspended）。</summary>
         public int MaxEscalate { get; set; } = 3;
+
+        /// <summary>启动时自动关闭有线网卡"允许计算机关闭此设备以节约电源"（防网卡被降电挂死）。</summary>
+        public bool DisableAdapterPowerSaving { get; set; } = true;
+
+        /// <summary>省电设置复查间隔（秒）。0 = 只在启动时执行一次。</summary>
+        public int PowerSavingCheckIntervalSec { get; set; } = 0;
     }
 
     public sealed class LogConfig

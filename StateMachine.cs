@@ -42,6 +42,7 @@ public sealed class StateMachine
     private int _escalateCount;      // 连续 Escalate 次数（达上限进 Suspended）
     private DateTime _lastAppFaultWarn = DateTime.MinValue; // AppFault 静默期时间戳
     private DateTime _lastSuspendProbe = DateTime.MinValue; // Suspended 上次唤醒探测时间
+    private DateTime _lastPowerSavingCheck = DateTime.MinValue; // 省电设置上次复查时间
 
     public FixState State { get; private set; } = FixState.Monitoring;
     public DateTime LastFixTime { get; private set; }
@@ -128,11 +129,14 @@ public sealed class StateMachine
         }
     }
 
-    /// <summary>正常监测：分层探测 + 例行 WiFi 守护，决定进入何状态。</summary>
+    /// <summary>正常监测：分层探测 + 例行 WiFi 守护 + 省电复查，决定进入何状态。</summary>
     private void DoMonitoring()
     {
         // 例行 WiFi 守护：无论有线是否正常，WiFi 未连接（含 Software Off）都主动打开并连接
         EnsureWifiRoutine();
+
+        // 省电复查：启动时必做一次；若配置了复查间隔则周期性复查（防用户/系统把省电设置改回）
+        EnsurePowerSavingDisabled();
 
         var r = _probe.Probe();
         LastProbe = r;
@@ -255,7 +259,22 @@ public sealed class StateMachine
             // 重启后等 DHCP 完成（等 IP 就绪，最多 dhcpWaitSec），避免误判"没恢复"再次重启打断 DHCP
             var waited = WaitForValidIp(adapter.Name);
             if (!waited)
-                _log.Warn("[StateMachine] 重启后 DHCP 未在等待期内拿到合法 IP（可能 169.254）");
+            {
+                _log.Warn("[StateMachine] 接口级重启后 DHCP 未在等待期内拿到合法 IP（可能 169.254，网卡僵尸状态）");
+                // 升级：PnP 驱动级重启（等效"禁用/启用设备"，能重载驱动，替代"重启电脑"）
+                var pnpId = AdapterManager.GetWiredPnpDeviceId(adapter.Name, _log);
+                if (pnpId != null && AdapterManager.RestartAdapterPnp(pnpId, _log))
+                {
+                    LastFixTime = DateTime.Now;
+                    waited = WaitForValidIp(adapter.Name);
+                    if (!waited)
+                        _log.Warn("[StateMachine] PnP 驱动级重启后仍未拿到合法 IP");
+                }
+                else
+                {
+                    _log.Warn("[StateMachine] PnP 驱动级重启不可用或失败");
+                }
+            }
             Transition(FixState.RecoverWait);
         }
         else
@@ -371,6 +390,39 @@ public sealed class StateMachine
         _wlan.EnsureWifiUp(_config.Repair.PreferredSsid);
     }
 
+    /// <summary>
+    /// 省电复查：确保有线网卡"允许计算机关闭此设备以节约电源"处于关闭状态。
+    /// 启动时必做一次；配置了复查间隔则按间隔周期性复查（防设置被系统/用户改回）。
+    /// </summary>
+    private void EnsurePowerSavingDisabled()
+    {
+        if (!_config.Repair.DisableAdapterPowerSaving) return;
+
+        var interval = _config.Repair.PowerSavingCheckIntervalSec;
+        if (_lastPowerSavingCheck != DateTime.MinValue && interval <= 0)
+            return; // 只启动时执行一次
+        if (interval > 0 && (DateTime.Now - _lastPowerSavingCheck).TotalSeconds < interval)
+            return;
+
+        var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+        if (adapter == null) return;
+
+        _lastPowerSavingCheck = DateTime.Now;
+
+        // 查询当前状态；若允许降电则关闭
+        var enabled = AdapterManager.IsPowerSavingEnabled(adapter.Name, _log);
+        if (enabled == true)
+        {
+            _log.Info($"[StateMachine] 检测到有线网卡允许系统省电挂起（{adapter.Name}），自动关闭");
+            AdapterManager.DisablePowerSaving(adapter.Name, _log);
+        }
+        else if (enabled == false)
+        {
+            _log.Debug($"[StateMachine] 有线网卡省电已关闭（{adapter.Name}）");
+        }
+        // enabled == null：查询失败，跳过（已记日志）
+    }
+
     /// <summary>Escalate：长冷却（默认 10 分钟），累计次数达上限进 Suspended（停手）。</summary>
     private void DoEscalate()
     {
@@ -456,9 +508,15 @@ public sealed class StateMachine
             _retryCount = 0;
             Transition(FixState.Monitoring);
         }
+        else if (!r.AdapterUp)
+        {
+            // 物理断线（拔线/端口 down）：重启网卡无效，继续停手等待链路恢复
+            _log.Info("[StateMachine] 停手期间物理断线，继续停手等待");
+            // 保持 Suspended（_lastSuspendProbe 已更新，冷却重新计时）
+        }
         else
         {
-            // 仍不可用：主动重启网卡再试，而非永久停手
+            // 仍不可用（适配器 Up 但无网）：主动重启网卡再试，而非永久停手
             _log.Warn("[StateMachine] 仍不可用，30 分钟后主动重启网卡再试");
             _retryCount = 0;
             Transition(FixState.RestartAdapter);

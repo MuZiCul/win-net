@@ -7,16 +7,22 @@
     <Nullable>enable</Nullable>
     <AssemblyName>WinNetFix</AssemblyName>
     <RootNamespace>WinNetFix</RootNamespace>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <PublishTrimmed>true</PublishTrimmed>
-    <TrimMode>partial</TrimMode>
     <!-- 注意：不能开 InvariantGlobalization，否则 CodePagesEncodingProvider 无法提供 GBK/936，
          导致 netsh 中文输出解码失败（TypeInitializationException） -->
+    <!-- 注意：不能开 PublishTrimmed —— .NET 8 中 WinForms 不支持剪裁（NETSDK1175） -->
     <DebugType>embedded</DebugType>
+    <!-- 托盘图标需要 WinForms -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
+
+  <!-- 内嵌托盘图标（TrayApp 运行时从资源加载 PNG，再转 Icon） -->
+  <ItemGroup>
+    <EmbeddedResource Include="assets\WinNetFix.png" />
+  </ItemGroup>
 
   <!-- 防止裁剪掉代码页编码（GBK/936），否则 netsh 中文输出无法解码 -->
   <ItemGroup>

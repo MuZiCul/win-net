@@ -158,8 +158,13 @@ public sealed class WlanManager
         }
         else
         {
-            // 未 Software Off 但 disconnected，仍确保接口 enable（忽略失败，接口可能已启用）
-            ProcessRunner.RunNetsh($"interface set interface name=\"{iface}\" admin=enable");
+            // 未 Software Off 但 disconnected，仍确保接口 enable
+            var en = ProcessRunner.RunNetsh($"interface set interface name=\"{iface}\" admin=enable");
+            if (!en.Ok && !IsInterfaceAdminEnabled(iface))
+            {
+                _log.Warn($"[WlanManager] 启用接口失败(exit={en.ExitCode}): {en.StdErr}（可能需要管理员权限）");
+                return false;
+            }
         }
 
         // 3. 确定目标 SSID：preferredSsid → 最近连接 → 首个 profile

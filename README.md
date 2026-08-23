@@ -28,8 +28,18 @@ dotnet build -c Debug
 
 # 单文件发布（self-contained，免装 .NET）/ Publish single-file
 .\publish.ps1
-# 产物在 publish/WinNetFix.exe（固定名）与 publish/WinNetFix-vX.Y.Z.exe（带版本号）
+# 产物在 publish/：
+#   WinNetFix.exe                   固定名（供自启/日常）
+#   WinNetFix-vX.Y.Z.exe            便携版（带版本号）
+#   WinNetFix-vX.Y.Z.zip            便携版压缩包（内含固定名 WinNetFix.exe）
+#   WinNetFix-Setup-X.Y.Z.exe       安装版（Inno Setup，需另行安装 ISCC 编译）
 ```
+
+### 安装方式 / Installation
+
+**安装版（推荐）**：下载 `WinNetFix-Setup-X.Y.Z.exe`，双击安装到 `C:\Program Files\WinNetFix\`，自动注册开机自启；升级直接运行新版本覆盖安装；卸载从控制面板卸载（自动移除自启）。
+
+**便携版**：下载 `WinNetFix-vX.Y.Z.zip` 解压到固定目录（如 `D:\WinNetFix\`），运行其中的 `WinNetFix.exe --install` 注册自启（升级时解压覆盖即可，自启路径不变）。
 
 ### 用法 / Usage
 
@@ -113,7 +123,10 @@ schtasks /Delete /TN "WinNetFix" /F
 
 ### 行为说明与限制 / Behavior & Limitations
 
-- **必须管理员权限**：重启网卡、开 WiFi 等操作需要管理员。`--run` 非管理员时会提示，修复类操作会失败。/ **Administrator required**: restarting adapter and turning on WiFi need elevation.
+- **权限模型（需要管理员）**：重启网卡、开 WiFi、改省电等操作需要管理员权限。工具按启动方式自动处理：
+  - **计划任务自启**（`--install`）：以**最高权限**运行，**无需弹 UAC**——这是推荐的常驻方式。
+  - **手动运行**（`--run`/`--once` 等）：非管理员时**自动弹出 UAC 提权重启**，点"允许"后以管理员运行；拒绝则回退普通权限继续（探测可用，修复类操作会失败并提示）。
+  - `--status` 为只读探测，无需提权。/ **Permission model (admin required)**: adapter restart, WiFi control and power-saving changes need elevation. The tool handles it automatically by launch method — scheduled task auto-start runs elevated with no UAC prompt; manual run triggers UAC elevation once; `--status` is read-only and needs no elevation.
 - **飞行模式（Hardware Off）**：系统锁定无线 radio，任何软件都无法自动打开。工具会检测并提示手动开启，不做强行绕过。/ **Airplane mode**: locks radio at OS level; tool detects and prompts, never bypasses.
 - **WiFi 开关（Software Off）**：工具可自动打开/关闭（通过 Windows WLAN API）。/ Tool can auto on/off WiFi switch via Windows WLAN API.
 - **切公共 DNS 不改回**：DNS 故障时以太网 IPv4 会切到公共 DNS 且不还原。若介意可在配置关闭 `fallbackPublicDns`。/ Public DNS is not reverted; disable `fallbackPublicDns` if undesired.
@@ -151,8 +164,14 @@ Requires [.NET 8 SDK](https://dotnet.microsoft.com/download).
 
 ```powershell
 dotnet build -c Debug
-.\publish.ps1   # single-file self-contained → publish/WinNetFix.exe + publish/WinNetFix-vX.Y.Z.exe
+.\publish.ps1   # → publish/WinNetFix.exe + WinNetFix-vX.Y.Z.exe + WinNetFix-vX.Y.Z.zip
 ```
+
+### Installation
+
+**Installer (recommended)**: download `WinNetFix-Setup-X.Y.Z.exe`, double-click to install into `C:\Program Files\WinNetFix\` with auto-start registered; upgrades overwrite in place; uninstall via Control Panel (removes auto-start).
+
+**Portable**: download `WinNetFix-vX.Y.Z.zip`, extract to a fixed folder, run `WinNetFix.exe --install` to register auto-start (upgrades = extract over; auto-start path stays stable).
 
 ### Usage
 
@@ -191,7 +210,7 @@ schtasks /Delete /TN "WinNetFix" /F
 
 ### Behavior & Limitations
 
-- **Administrator required** for restarting adapters / turning on WiFi; otherwise those actions fail with a warning.
+- **Permission model (admin required)**: adapter restart, WiFi control and power-saving changes need elevation. The tool handles it automatically: scheduled-task auto-start (`--install`) runs elevated with **no UAC prompt**; manual runs (`--run`/`--once`) trigger a **one-time UAC elevation** (rejecting falls back to non-admin with warnings); `--status` is read-only and needs no elevation.
 - **Airplane mode (Hardware Off)** locks radio at OS level and cannot be opened by software; the tool detects it and prompts the user.
 - **WiFi switch (Software Off)** can be toggled automatically via the Windows WLAN API.
 - Public DNS is not reverted after a DNS fault; disable `fallbackPublicDns` in config if undesired.

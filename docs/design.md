@@ -1,7 +1,7 @@
 # Win 网络修复工具 — 技术设计文档
 
-> 版本：v0.1.2（对应 Release v0.1.2）
-> 日期：2026-08-23
+> 版本：v0.1.3（对应 Release v0.1.3）
+> 日期：2026-08-24
 > 状态：已实施并发布（含 WiFi 开关 WLAN API 详细技术、169.254 DHCP 修复、停手策略）
 
 ---
@@ -82,7 +82,9 @@
     "maxRetry": 3,
     "backoffSec": [5, 15, 30],
     "escalateCooldownSec": 1800,   // 冷却时长（30 分钟）：连续失败/停手后暂停多久再重试
-    "maxEscalate": 3               // 连续 Escalate 达此数进停手
+    "maxEscalate": 3,              // 连续 Escalate 达此数进停手
+    "disableAdapterPowerSaving": true,  // 启动时关闭有线网卡省电挂起（防僵尸状态）
+    "powerSavingCheckIntervalSec": 0    // 省电复查间隔（0=仅启动时一次）
   },
   "log": {
     "level": "Info",
@@ -141,7 +143,7 @@
 | `DnsFault` | 网关/外网 ICMP 通但**域名解析失败**（仅 DNS 层故障） |
 | `FlushDns` | 执行 `ipconfig /flushdns` 刷新 DNS 缓存（第一层修复） |
 | `SetPublicDns` | `FlushDns` 后仍不通 → 临时将**以太网 IPv4** DNS 切到公共 DNS（不改回） |
-| `RestartAdapter` | 执行禁用/启用**有线**网卡（链路层故障主修复） |
+| `RestartAdapter` | 执行禁用/启用**有线**网卡（链路层故障主修复）；等 IP 失败时**升级 PnP 驱动级重启**（等效"禁用/启用设备"，替代"重启电脑"） |
 | `RenewDhcp` | **169.254（DHCP 拿不到 IP）**：强制 `ipconfig /release + /renew`，**不重启网卡** |
 | `RecoverWait` | 修复后等待网络恢复（先等 IP 就绪，最多 `dhcpWaitSec`） |
 | `Healthy` | 修复成功，回归 Monitoring |
@@ -218,6 +220,37 @@ netsh interface set interface name="<name>" admin=disable
 netsh interface set interface name="<name>" admin=enable
 ```
 > 判定"卡死"前提：适配器 `Status=Up`（物理链路在）但探测失败。若 `Status=Down`（拔线/端口 down），**不执行本步骤**，转 `LinkDown` 等待。
+
+#### 5.1.1 PnP 驱动级重启（接口级重启无效时的升级手段）
+接口级禁用/启用（`Disable-NetAdapter`/`netsh admin=disable/enable`）**只能重载接口配置，无法重载驱动**。
+Intel I219 等网卡陷入"僵尸状态"时（表现为：无线正常、有线 169.254、`renew` 超时、接口级重启无效、**只有重启电脑才恢复**），
+需用 **PnP 设备级重启**（等效设备管理器"禁用/启用设备"，能真正重载驱动，替代"重启电脑"）：
+```powershell
+# 1. 反查有线网卡 PnP 设备 ID（双保险：描述必须含 Ethernet/以太网 且 不含 Wireless/WLAN/802.11）
+Get-NetAdapter -Name "<name>" | Select-Object Name, InterfaceDescription, PnpDeviceID
+
+# 2. PnP 设备级重启（Win10 1809+ 支持）
+pnputil /restart-device "PCI\VEN_8086&DEV_15B8&SUBSYS_..."
+# 回退方案：
+Disable-PnpDevice -InstanceId "PCI\..." -Confirm:$false
+Enable-PnpDevice  -InstanceId "PCI\..." -Confirm:$false
+```
+- **只作用于有线网卡**：PnPDeviceID 是硬件唯一标识，有线/无线 ID 不同，配合描述校验，绝不会误伤无线。
+- 触发时机：`RestartAdapter` 接口级重启成功但等 IP 仍失败（169.254 未消除）时自动升级执行。
+- 需管理员权限；`pnputil /restart-device` 需 Win10 1809+（1809 以下自动回退 `Disable/Enable-PnpDevice`）。
+
+#### 5.1.2 省电预防（启动自动关闭，防患于未然）
+网卡僵尸状态的最大诱因是 **Windows 网卡省电**：网线断开后网卡进入睡眠（D3），链路恢复时驱动未唤醒 → 死机态。
+工具启动（`--run`/`--once` 提权后）自动执行：
+```powershell
+# 关闭"断开时进入睡眠"（DeviceSleepOnDisconnect，Intel I219 的元凶）
+Set-NetAdapterPowerManagement -Name "<name>" -DeviceSleepOnDisconnect Disabled
+# 关闭"选择性挂起"（SelectiveSuspend，部分网卡不支持返回 Unsupported，无害）
+Set-NetAdapterPowerManagement -Name "<name>" -SelectiveSuspend Disabled
+```
+- 启动时执行一次；配置 `powerSavingCheckIntervalSec` 可周期性复查（防设置被改回）。
+- 查询逻辑兼容新旧参数（`DeviceSleepOnDisconnect` 优先，回退 `AllowComputerToTurnOffDevice`）。
+- 配置开关：`disableAdapterPowerSaving`（默认 true）。`--status` 可查看当前省电状态（需管理员）。
 
 ### 5.2 WiFi 例行守护（Monitoring 每次 tick 执行）
 与有线状态无关，每个监测周期都检查；未连接（含软件开关 Software Off）才主动打开并连接，已连接则跳过。
@@ -328,6 +361,7 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 | 重启网卡 | 以太网适配器不存在/匹配失败 | E200 | 日志 + Escalate | — |
 | 重启网卡 | 禁用失败（驱动忙） | E201 | 重试 1 次，仍失败 Escalate | 尝试 netsh 回退 |
 | 重启网卡 | 启用失败 | E202 | 记录，尝试 netsh 回退 | 通知用户手动启用 |
+| 重启网卡 | PnP 驱动级重启失败（驱动忙/无权限/版本低） | E203 | 记录，继续重试链路 | 提示用户手动重启电脑 |
 | WiFi 例行守护 | 无无线网卡/wlansvc 未运行 | E300 | 记 Debug，跳过本次守护 | 下个周期再查 |
 | WiFi 例行守护 | SSID 无 profile / 密码失效 | E301 | 记 Warn，跳过 | 提示用户重新保存 WiFi |
 | WiFi 例行守护 | 连接超时 / 信号不可达 | E302 | 记 Warn，进入冷却期（默认 60s） | 冷却后下个周期重试 |

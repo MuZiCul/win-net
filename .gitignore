@@ -10,6 +10,9 @@ publish/
 test-logs/
 config-test.json
 
+# 诊断日志（其他机器的日志拷贝，不提交）
+logs/
+
 # OS files
 Thumbs.db
 Desktop.ini
