@@ -1,8 +1,8 @@
 # Win 网络修复工具 — 技术设计文档
 
-> 版本：v0.1.0（对应 Release v0.1.0）
-> 日期：2026-08-20
-> 状态：已实施并发布（含 WiFi 开关 WLAN API 详细技术）
+> 版本：v0.1.1（对应 Release v0.1.1）
+> 日期：2026-08-23
+> 状态：已实施并发布（含 WiFi 开关 WLAN API 详细技术、169.254 DHCP 修复、停手策略）
 
 ---
 
@@ -63,22 +63,27 @@
     "intervalSec": 15,
     "failThreshold": 2,
     "timeoutMs": 3000,
-    "layers": {
-      "gatewayIcmp": true,        // 默认网关 IP，不依赖 DNS，判定本地链路
-      "publicIcmp": "8.8.8.8",    // 外网 IP，不依赖 DNS，判定出口可达
-      "dnsHttp": "https://www.msftconnecttest.com/connecttest.txt" // 依赖 DNS，判定域名解析
-    }
+    "gatewayIcmp": true,          // 网关 ICMP（不依赖 DNS，判定本地链路）
+    "publicIcmpTarget": "8.8.8.8", // 外网 ICMP 目标
+    "dnsHttpUrl": "https://www.msftconnecttest.com/connecttest.txt"
   },
   "repair": {
-  "restartAdapter": true,
-  "flushDns": true,             // DNS 层故障时先刷新缓存
-  "fallbackPublicDns": true,    // flush 无效则临时切换公共 DNS（仅以太网 IPv4，不改回）
-  "publicDns": ["8.8.8.8", "223.5.5.5"],
-  "reconnectWifi": true,
-  "preferredSsid": "",          // 空 = 使用断连前最后连接的 SSID
-  "adapterMatch": "auto",        // auto / 按名称正则
-  "maxRetry": 3,
-  "backoffSec": [5, 15, 30]
+    "restartAdapter": true,
+    "recoverWaitSec": 20,          // 重启后等 DHCP 完成的等待
+    "dhcpWaitSec": 20,             // 等 IP 就绪（非 169.254）轮询上限
+    "renewDhcp": true,             // 169.254 时强制 ipconfig /release + /renew
+    "flushDns": true,              // DNS 层故障时先刷新缓存
+    "fallbackPublicDns": true,     // flush 无效则临时切换公共 DNS（仅以太网 IPv4，不改回）
+    "publicDns": ["8.8.8.8", "223.5.5.5"],
+    "reconnectWifi": true,
+    "wifiRetryCooldownSec": 60,    // WiFi 连接失败冷却期
+    "preferredSsid": "",           // 空 = 使用断连前最后连接的 SSID
+    "adapterMatch": "auto",        // auto / 按名称正则
+    "maxRetry": 3,
+    "backoffSec": [5, 15, 30],
+    "escalateCooldownSec": 600,    // Escalate 长冷却（10 分钟）
+    "maxEscalate": 3,              // 连续 Escalate 达此数进停手
+    "suspendResumeHours": 1        // 停手后每小时唤醒探测一次
   },
   "log": {
     "level": "Info",
@@ -132,51 +137,60 @@
 | 状态 | 含义 |
 |------|------|
 | `Monitoring` | 正常监测有线适配器（周期性**分层**探测）+ **WiFi 例行守护**（每次 tick 检查，未连接则主动打开并连接） |
-| `SuspectDown` | 达到 `failThreshold` 次失败且适配器仍 `Up`，判定为"卡死" |
+| `SuspectDown` | 达到 `failThreshold` 次失败且适配器仍 `Up` 且有合法 IP，判定为"卡死" |
 | `LinkDown` | 探测失败但适配器 `Down`（物理拔线/端口 down），不修复，仅记录等待 |
 | `DnsFault` | 网关/外网 ICMP 通但**域名解析失败**（仅 DNS 层故障） |
 | `FlushDns` | 执行 `ipconfig /flushdns` 刷新 DNS 缓存（第一层修复） |
 | `SetPublicDns` | `FlushDns` 后仍不通 → 临时将**以太网 IPv4** DNS 切到公共 DNS（不改回） |
 | `RestartAdapter` | 执行禁用/启用**有线**网卡（链路层故障主修复） |
-| `RecoverWait` | 修复后等待网络恢复 |
+| `RenewDhcp` | **169.254（DHCP 拿不到 IP）**：强制 `ipconfig /release + /renew`，**不重启网卡** |
+| `RecoverWait` | 修复后等待网络恢复（先等 IP 就绪，最多 `dhcpWaitSec`） |
 | `Healthy` | 修复成功，回归 Monitoring |
-| `Escalate` | 超过 `maxRetry` 仍失败，写错误日志并暂停一段时间 |
+| `Escalate` | 连续失败**长冷却**（`escalateCooldownSec`，默认 10 分钟），累计达 `maxEscalate` 进 Suspended |
+| `Suspended` | **停手**：不再干预网卡，仅每 `suspendResumeHours` 唤醒探测一次，恢复则回归 |
 
 ### 4.2 状态转移图
 ```
-            probe: 三层全通
+            probe: 三层全通 + 合法 IP
 Monitoring ───────────► Monitoring (stay)
 
             probe fail (适配器 Up)
 Monitoring ──┬────────► LinkDown (适配器 Down) ──(恢复 Up)──► Monitoring
              │
-             └─(连续失败达阈值)──► SuspectDown
-                                      │
-                  ┌───────────────────┴───────────────────┐
-           网关/外网 ICMP 不通                      网关/外网通 但 DNS 不通
-                  │                                    │
-                  ▼                                    ▼
-           RestartAdapter                        DnsFault ──► FlushDns
-                  │ ok                               │ ok(域名恢复)
-                  ▼                                   ▼
-              RecoverWait                       RecoverWait ──ok──► Healthy
-                  │ 有线恢复 ok x2                   │ 仍不通
-                  ▼                                   ▼
-               Healthy ──► Monitoring           SetPublicDns (切以太网 IPv4 公共 DNS)
-                  │ 仍失败 (达 maxRetry)               │ ok / 失败
-                  ▼                                   ▼
-               Escalate ──(暂停退避)──► Monitoring    RecoverWait ──ok──► Healthy ──► Monitoring
+             ├─(仅 169.254 无合法 IP)──► RenewDhcp ──ok──► RecoverWait ──ok──► Healthy
+             │                              │ 仍失败
+             └─(连续失败达阈值且有合法 IP)──► SuspectDown
+                                              │
+                    ┌─────────────────────────┴──────────────────────────┐
+             网关/外网 ICMP 不通                                   网关/外网通 但 DNS 不通
+                    │                                                     │
+                    ▼                                                     ▼
+             RestartAdapter                                     DnsFault ──► FlushDns
+                    │ ok (等 DHCP 就绪)                                    │ ok(域名恢复)
+                    ▼                                                      ▼
+                RecoverWait                                          RecoverWait ──ok──► Healthy
+                    │ 有线恢复 ok x2                                      │ 仍不通
+                    ▼                                                      ▼
+                 Healthy ──► Monitoring                          SetPublicDns (切以太网 IPv4 公共 DNS)
+                    │ 仍失败 (达 maxRetry)                                  │ ok / 失败
+                    ▼                                                      ▼
+                 Escalate (长冷却 escalateCooldownSec)              RecoverWait ──ok──► Healthy ──► Monitoring
+                    │ 累计达 maxEscalate 次
+                    ▼
+                 Suspended (停手，每 suspendResumeHours 唤醒探测，恢复则回归)
 ```
 
 > 说明：
 > - **WiFi 例行守护**：`Monitoring` 每次 tick 先执行 WiFi 守护（`EnsureWifiRoutine`）再探测有线。无论有线是否正常，只要 WiFi 未连接（含 `Software Off`）就主动打开无线并连接已存 SSID；已连接则不动。连接失败进入冷却期（默认 60s，可配置 `wifiRetryCooldownSec`），避免反复尝试。**WiFi 不作为有线修复失败的兜底**，两者解耦。
 > - **分层判定**避免误重启：DNS 故障时（ICMP 通、域名不通）走 `FlushDns`，**不重启网卡**（重启救不了 DNS，反而打断连接）。
-> - `AppFault`（链路/DNS 通但 HTTP 不可达，如 SSL 被拦）：不重启网卡、不折腾 DNS，首次 Warn + 进 `Escalate` 观察，静默期内（`appFaultSilenceSec`）仅记 Debug。
+> - **169.254 不重启网卡**：适配器 Up 但只有 169.254（DHCP 未拿到 IP）时走 `RenewDhcp`（强制续租），**重启网卡无效且会反复打断 DHCP**。
+> - `AppFault`（链路/DNS 通但 HTTP 不可达，如 SSL 被拦）：不重启网卡、不折腾 DNS，**仅记录、保持 Monitoring，不进 Escalate**（避免误耗 escalateCount 导致误停手），静默期内（`appFaultSilenceSec`）仅记 Debug。
 
-### 4.3 重试与退避
+### 4.3 重试、退避与停手
 - 每次完整修复周期后 `retryCount++`。
 - 若 `retryCount < maxRetry`：按 `backoffSec[retryCount]` 退避后重新进入 `RestartAdapter`。
-- 超过 `maxRetry`：进入 `Escalate`，暂停 `backoffSec` 最后一项时长，然后重置计数器回到 `Monitoring`（避免死循环拖垮系统）。
+- 超过 `maxRetry`：进入 `Escalate`，**长冷却 `escalateCooldownSec`（默认 600s）** 后重置计数回到 `Monitoring`。
+- **停手**：`Escalate` 累计 `maxEscalate`（默认 3）次后进入 `Suspended`——不再干预网卡（避免反复打断 DHCP 使故障恶化），仅每 `suspendResumeHours`（默认 1h）唤醒探测一次，网络恢复则自动回归 `Monitoring`。
 - `LinkDown` 状态**不计入重试**，不重启网卡（物理断线重启无效），待链路恢复 `Up` 后自动回 `Monitoring`。
 
 ---
@@ -307,6 +321,7 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 | 启动 | 非管理员权限 | E001 | 日志告警，仍尝试运行（重启网卡会失败） | 提示用户以管理员运行 |
 | 启动 | 单实例已存在 | E002 | 退出，不重复拉起 | — |
 | 探测 | 适配器 Down（物理拔线/端口 down） | E100 | **不重启**，转 `LinkDown` 等待 | 链路恢复 Up 后自动回 Monitoring |
+| 探测 | 适配器 Up 但仅 169.254（DHCP 未拿 IP） | E110 | 计入失败计数 | 达阈值进入 RenewDhcp（**不重启网卡**） |
 | 探测 | 网关/外网 ICMP 不通（链路层故障） | E101 | 计入失败计数 | 达阈值进入重启网卡（RestartAdapter） |
 | 探测 | 网关/外网通但域名解析失败（DNS 层故障） | E102 | 计入失败计数 | 达阈值进入 FlushDns（**不重启网卡**） |
 | DNS 修复 | `ipconfig /flushdns` 后域名仍不通 | E103 | 转 `SetPublicDns`：临时切以太网 IPv4 到公共 DNS（不改回） | 仍不通 → E104 |
@@ -318,7 +333,9 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 | WiFi 例行守护 | SSID 无 profile / 密码失效 | E301 | 记 Warn，跳过 | 提示用户重新保存 WiFi |
 | WiFi 例行守护 | 连接超时 / 信号不可达 | E302 | 记 Warn，进入冷却期（默认 60s） | 冷却后下个周期重试 |
 | WiFi 例行守护 | 无线硬件关闭（飞行模式） | E303 | 记 Warn，无法软件开启 | 提示用户手动开启 |
-| 恢复确认 | 修复后仍不可达 | E400 | 进入退避重试 | 达到 maxRetry 暂停 |
+| 恢复确认 | 修复后仍不可达 | E400 | 进入退避重试 | 达到 maxRetry 进入 Escalate |
+| DHCP 修复 | `ipconfig /renew` 失败 / 续租后仍 169.254 | E500 | 计入重试 | 达 maxRetry → Escalate |
+| 停手 | 连续 `maxEscalate` 次失败 | E600 | 进 Suspended，不再干预网卡 | 每 `suspendResumeHours` 唤醒探测，恢复回归 |
 
 ---
 
