@@ -7,25 +7,30 @@ namespace WinNetFix;
 /// <summary>分层探测结果。故障层判定见 ProbeLayer.Probe。</summary>
 public sealed record ProbeResult(
     bool AdapterUp,
+    bool HasValidIp,  // 是否有非 169.254 的合法 IPv4（判定 DHCP 是否拿到 IP）
     bool GatewayOk,
     bool PublicOk,
     bool DnsOk,      // DNS 解析成功（Dns.GetHostAddresses）
     bool AppOk,      // 应用层 HTTP 可达（附加信息，不参与 DNS 判定）
     string? AdapterName,
     string? GatewayIp,
+    string? AdapterIp,  // 当前 IPv4 地址（169.254 即 DHCP 未就绪）
     int ProbeSeq)    // 探测序号，用于日志
 {
-    /// <summary>链路层故障：网关或外网 ICMP 不通（不依赖 DNS）。</summary>
-    public bool LinkFault => AdapterUp && (!GatewayOk || !PublicOk);
+    /// <summary>DHCP 故障：适配器 Up 但只有 169.254（APIPA），未拿到合法 IP。</summary>
+    public bool DhcpFault => AdapterUp && !HasValidIp;
+
+    /// <summary>链路层故障：适配器 Up 且有合法 IP，但网关或外网 ICMP 不通（不依赖 DNS）。</summary>
+    public bool LinkFault => AdapterUp && HasValidIp && (!GatewayOk || !PublicOk);
 
     /// <summary>DNS 层故障：链路通但域名解析失败。</summary>
-    public bool DnsFault => AdapterUp && GatewayOk && PublicOk && !DnsOk;
+    public bool DnsFault => AdapterUp && HasValidIp && GatewayOk && PublicOk && !DnsOk;
 
     /// <summary>应用层故障：链路通、DNS 解析通、但 HTTP 不可达（SSL 拦截/防火墙封 443 等）。非本工具可修，不重启网卡。</summary>
-    public bool AppFault => AdapterUp && GatewayOk && PublicOk && DnsOk && !AppOk;
+    public bool AppFault => AdapterUp && HasValidIp && GatewayOk && PublicOk && DnsOk && !AppOk;
 
     /// <summary>网络栈健康（不含 AppOk：应用层被拦不代表网络栈故障）。</summary>
-    public bool AllOk => AdapterUp && GatewayOk && PublicOk && DnsOk;
+    public bool AllOk => AdapterUp && HasValidIp && GatewayOk && PublicOk && DnsOk;
 }
 
 /// <summary>仅针对以太网（有线）适配器的分层连通性探测。</summary>
@@ -50,7 +55,20 @@ public sealed class ProbeLayer
         var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
         bool adapterUp = adapter is { OperationalStatus: OperationalStatus.Up };
 
-        // 2. 网关 ICMP
+        // 2. 检查适配器 IP：是否有非 169.254 的合法 IPv4（判定 DHCP 是否完成）
+        string? adapterIp = null;
+        bool hasValidIp = false;
+        if (adapter != null && adapterUp)
+        {
+            var ipv4 = adapter.GetIPProperties().UnicastAddresses
+                .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                .Select(a => a.Address.ToString())
+                .ToList();
+            adapterIp = ipv4.FirstOrDefault();
+            hasValidIp = ipv4.Any(ip => !ip.StartsWith("169.254.", StringComparison.Ordinal));
+        }
+
+        // 3. 网关 ICMP
         string? gw = null;
         bool gwOk = false;
         if (_config.Probe.GatewayIcmp)
@@ -64,18 +82,18 @@ public sealed class ProbeLayer
             gwOk = true; // 未启用网关探测时不判链路
         }
 
-        // 3. 外网 ICMP
+        // 4. 外网 ICMP
         bool publicOk = _config.Probe.PublicIcmpTarget.Length > 0
                         && PingOk(_config.Probe.PublicIcmpTarget, _config.Probe.TimeoutMs);
 
-        // 4. DNS 解析（直接解析目标域名，不依赖 HTTP）
+        // 5. DNS 解析（直接解析目标域名，不依赖 HTTP）
         bool dnsOk = DnsResolveOk(_config.Probe.DnsHttpUrl);
 
-        // 5. 应用层 HTTP（附加探测，仅诊断，不参与 DNS 判定）
+        // 6. 应用层 HTTP（附加探测，仅诊断，不参与 DNS 判定）
         bool appOk = HttpOk();
 
-        return new ProbeResult(adapterUp, gwOk, publicOk, dnsOk, appOk,
-            adapter?.Name, gw, seq);
+        return new ProbeResult(adapterUp, hasValidIp, gwOk, publicOk, dnsOk, appOk,
+            adapter?.Name, gw, adapterIp, seq);
     }
 
     /// <summary>从 URL 提取主机名并解析，成功即视为 DNS 层健康。</summary>

@@ -61,10 +61,25 @@ public sealed class Config
         public int AppFaultSilenceSec { get; set; } = 600;
 
         /// <summary>重启网卡后等待链路恢复的时长（秒）。</summary>
-        public int RecoverWaitSec { get; set; } = 8;
+        public int RecoverWaitSec { get; set; } = 20;
 
         /// <summary>DNS 修复（flush/切DNS）后等待的时长（秒）。</summary>
         public int DnsWaitSec { get; set; } = 3;
+
+        /// <summary>等 IP 就绪（DHCP 完成）轮询上限（秒）。</summary>
+        public int DhcpWaitSec { get; set; } = 20;
+
+        /// <summary>检测到 169.254（DHCP 拿不到 IP）时执行 ipconfig /release + /renew。</summary>
+        public bool RenewDhcp { get; set; } = true;
+
+        /// <summary>Escalate 长冷却（秒）：连续失败后暂停这么久再回归监测，避免反复打断 DHCP。</summary>
+        public int EscalateCooldownSec { get; set; } = 600;
+
+        /// <summary>连续 Escalate 达此次数后进入停手（Suspended）。</summary>
+        public int MaxEscalate { get; set; } = 3;
+
+        /// <summary>停手（Suspended）后每小时唤醒探测一次，网络恢复则自动回归。</summary>
+        public int SuspendResumeHours { get; set; } = 1;
     }
 
     public sealed class LogConfig

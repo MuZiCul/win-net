@@ -9,9 +9,11 @@ public enum FixState
     FlushDns,
     SetPublicDns,
     RestartAdapter,
+    RenewDhcp,      // 169.254：DHCP 拿不到 IP，强制续租
     RecoverWait,
     Healthy,
-    Escalate,
+    Escalate,       // 连续失败长冷却
+    Suspended,      // 彻底停手，仅定时唤醒探测
 }
 
 /// <summary>
@@ -37,7 +39,9 @@ public sealed class StateMachine
     private int _linkFailCount;      // 链路层连续失败计数
     private int _dnsFailCount;       // DNS 层连续失败计数
     private int _retryCount;         // 修复周期重试次数
+    private int _escalateCount;      // 连续 Escalate 次数（达上限进 Suspended）
     private DateTime _lastAppFaultWarn = DateTime.MinValue; // AppFault 静默期时间戳
+    private DateTime _lastSuspendProbe = DateTime.MinValue; // Suspended 上次唤醒探测时间
 
     public FixState State { get; private set; } = FixState.Monitoring;
     public DateTime LastFixTime { get; private set; }
@@ -106,6 +110,14 @@ public sealed class StateMachine
                 DoSetPublicDns();
                 break;
 
+            case FixState.RenewDhcp:
+                DoRenewDhcp();
+                break;
+
+            case FixState.Suspended:
+                DoSuspended();
+                break;
+
             case FixState.LinkDown:
                 DoLinkDown();
                 break;
@@ -124,7 +136,7 @@ public sealed class StateMachine
 
         var r = _probe.Probe();
         LastProbe = r;
-        _log.Info($"[Probe] seq={r.ProbeSeq} adapterUp={r.AdapterUp} gw={r.GatewayIp} gwOk={r.GatewayOk} publicOk={r.PublicOk} dnsOk={r.DnsOk} appOk={r.AppOk}");
+        _log.Info($"[Probe] seq={r.ProbeSeq} adapterUp={r.AdapterUp} ip={r.AdapterIp} gw={r.GatewayIp} gwOk={r.GatewayOk} publicOk={r.PublicOk} dnsOk={r.DnsOk} appOk={r.AppOk}");
 
         if (!r.AdapterUp)
         {
@@ -144,6 +156,21 @@ public sealed class StateMachine
             // 从 LinkDown 恢复：回到正常监测
             _log.Info("[StateMachine] 链路恢复 Up，回归 Monitoring");
             Transition(FixState.Monitoring);
+            return;
+        }
+
+        if (r.DhcpFault)
+        {
+            // 适配器 Up 但只有 169.254（DHCP 拿不到 IP）：不重启网卡（重启无效且打断 DHCP），
+            // 走强制续租。计数达到阈值才进 RenewDhcp，避免抖动误触发。
+            _dnsFailCount = 0;
+            _linkFailCount++;
+            _log.Debug($"[StateMachine] DHCP 故障计数 {_linkFailCount}/{_config.Probe.FailThreshold}（IP={r.AdapterIp}）");
+            if (_linkFailCount >= _config.Probe.FailThreshold)
+            {
+                _log.Warn("[StateMachine] 判定 DHCP 故障（169.254），进入强制续租");
+                Transition(FixState.RenewDhcp);
+            }
             return;
         }
 
@@ -176,8 +203,8 @@ public sealed class StateMachine
         if (r.AppFault)
         {
             // 链路/DNS 均通但 HTTP 不可达（SSL 拦截/防火墙封 443 等）：非本工具可修。
-            // 不重启网卡、不折腾 DNS。首次 Warn + 进 Escalate 观察一次；
-            // 静默期内重复出现仅记 Debug 并保持 Monitoring，避免日志刷屏。
+            // 不重启网卡、不折腾 DNS。不进 Escalate（避免误耗 escalateCount 导致误进 Suspended），
+            // 仅在 Monitoring 内按静默期记日志，保持 Monitoring。
             _linkFailCount = 0;
             _dnsFailCount = 0;
             var silenceSec = _config.Repair.AppFaultSilenceSec;
@@ -185,13 +212,12 @@ public sealed class StateMachine
             {
                 _lastAppFaultWarn = DateTime.Now;
                 _log.Warn("[StateMachine] 应用层不可达（链路/DNS 正常但 HTTP 失败），跳过修复，等待观察");
-                Transition(FixState.Escalate);
             }
             else
             {
                 _log.Debug("[StateMachine] 应用层仍不可达（静默期内，跳过）");
-                State = FixState.Monitoring;
             }
+            State = FixState.Monitoring;
             return;
         }
 
@@ -226,7 +252,10 @@ public sealed class StateMachine
         if (AdapterManager.RestartAdapter(adapter.Name, _log))
         {
             LastFixTime = DateTime.Now;
-            Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.RecoverWaitSec));
+            // 重启后等 DHCP 完成（等 IP 就绪，最多 dhcpWaitSec），避免误判"没恢复"再次重启打断 DHCP
+            var waited = WaitForValidIp(adapter.Name);
+            if (!waited)
+                _log.Warn("[StateMachine] 重启后 DHCP 未在等待期内拿到合法 IP（可能 169.254）");
             Transition(FixState.RecoverWait);
         }
         else
@@ -241,7 +270,7 @@ public sealed class StateMachine
     {
         var r = _probe.Probe();
         LastProbe = r;
-        _log.Info($"[Probe] 恢复确认 seq={r.ProbeSeq} adapterUp={r.AdapterUp} gw={r.GatewayIp} gwOk={r.GatewayOk} publicOk={r.PublicOk} dnsOk={r.DnsOk} appOk={r.AppOk}");
+        _log.Info($"[Probe] 恢复确认 seq={r.ProbeSeq} adapterUp={r.AdapterUp} ip={r.AdapterIp} gw={r.GatewayIp} gwOk={r.GatewayOk} publicOk={r.PublicOk} dnsOk={r.DnsOk} appOk={r.AppOk}");
 
         if (r.AllOk)
         {
@@ -342,16 +371,109 @@ public sealed class StateMachine
         _wlan.EnsureWifiUp(_config.Repair.PreferredSsid);
     }
 
-    /// <summary>Escalate：暂停退避最大时长，重置计数后回归 Monitoring。</summary>
+    /// <summary>Escalate：长冷却（默认 10 分钟），累计次数达上限进 Suspended（停手）。</summary>
     private void DoEscalate()
     {
-        var sec = _config.Repair.BackoffSec.Length > 0 ? _config.Repair.BackoffSec[^1] : 30;
-        _log.Warn($"[StateMachine] Escalate：暂停 {sec}s 后回归 Monitoring");
-        Thread.Sleep(TimeSpan.FromSeconds(sec));
+        _escalateCount++;
+        _log.Warn($"[StateMachine] Escalate {_escalateCount}/{_config.Repair.MaxEscalate}：暂停 {_config.Repair.EscalateCooldownSec}s 再回归监测");
+
+        if (_escalateCount >= _config.Repair.MaxEscalate)
+        {
+            _log.Error($"[StateMachine] 连续 {_escalateCount} 次失败，进入停手（Suspended），不再干预网卡。每隔 {_config.Repair.SuspendResumeHours}h 自动唤醒探测一次");
+            Transition(FixState.Suspended);
+            return;
+        }
+
+        Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.EscalateCooldownSec));
         _linkFailCount = 0;
         _dnsFailCount = 0;
         _retryCount = 0;
         Transition(FixState.Monitoring);
+    }
+
+    /// <summary>169.254 DHCP 故障：强制 ipconfig /release + /renew，等 IP 就绪后恢复确认。</summary>
+    private void DoRenewDhcp()
+    {
+        if (!_config.Repair.RenewDhcp)
+        {
+            _log.Warn("[StateMachine] 配置关闭 DHCP 续租，进入 Escalate");
+            Transition(FixState.Escalate);
+            return;
+        }
+
+        var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+        if (adapter == null)
+        {
+            _log.Error("[AdapterManager] 未找到以太网适配器，无法续租");
+            Transition(FixState.Escalate);
+            return;
+        }
+
+        if (AdapterManager.RenewDhcp(adapter.Name, _log))
+        {
+            LastFixTime = DateTime.Now;
+            // 等 DHCP 完成（轮询 IP 就绪，最多 dhcpWaitSec）
+            if (WaitForValidIp(adapter.Name))
+            {
+                Transition(FixState.RecoverWait);
+            }
+            else
+            {
+                _log.Warn("[StateMachine] DHCP 续租后仍未拿到合法 IP");
+                HandleRecoveryFailed(useDns: false);
+            }
+        }
+        else
+        {
+            HandleRecoveryFailed(useDns: false);
+        }
+    }
+
+    /// <summary>停手：不再干预网卡，仅按 SuspendResumeHours 定时唤醒探测一次，恢复则回归。</summary>
+    private void DoSuspended()
+    {
+        // 定时唤醒探测：未到间隔则睡眠等待（用 intervalSec 控制轮询频率）
+        if ((DateTime.Now - _lastSuspendProbe).TotalHours < _config.Repair.SuspendResumeHours)
+        {
+            Thread.Sleep(TimeSpan.FromSeconds(_config.Probe.IntervalSec));
+            return;
+        }
+        _lastSuspendProbe = DateTime.Now;
+
+        _log.Info("[StateMachine] 停手中，定时唤醒探测一次");
+        var r = _probe.Probe();
+        LastProbe = r;
+        if (r.AllOk)
+        {
+            _log.Info("[StateMachine] 停手期间网络已恢复，回归 Monitoring");
+            _escalateCount = 0;
+            _linkFailCount = 0;
+            _dnsFailCount = 0;
+            _retryCount = 0;
+            Transition(FixState.Monitoring);
+        }
+        else
+        {
+            _log.Debug("[StateMachine] 仍不可用，继续停手");
+        }
+    }
+
+    /// <summary>轮询等待适配器拿到非 169.254 的合法 IP，超时返回 false。</summary>
+    private bool WaitForValidIp(string adapterName)
+    {
+        var deadline = DateTime.Now.AddSeconds(_config.Repair.DhcpWaitSec);
+        while (DateTime.Now < deadline)
+        {
+            var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+            if (adapter != null && adapter.GetIPProperties().UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    .Any(a => !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)))
+            {
+                return true;
+            }
+            Thread.Sleep(2000);
+        }
+        return false;
     }
 
     private void DoLinkDown()

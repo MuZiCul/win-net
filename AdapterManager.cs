@@ -72,4 +72,25 @@ public static class AdapterManager
 
     /// <summary>简单转义 PowerShell 单引号字符串。</summary>
     private static string EscapePs(string s) => s.Replace("'", "''");
+
+    /// <summary>强制 DHCP 重新续租（ipconfig /release + /renew）。用于 169.254（DHCP 拿不到 IP）场景。</summary>
+    public static bool RenewDhcp(string adapterName, Logger log)
+    {
+        log.Info($"[AdapterManager] 强制 DHCP 续租: {adapterName}");
+
+        // release 后 renew（release 失败不影响 renew 尝试）
+        var release = ProcessRunner.Run("ipconfig.exe", $"/release \"{adapterName}\"");
+        if (!release.Ok)
+            log.Debug($"[AdapterManager] ipconfig /release 返回 {release.ExitCode}: {release.StdErr}");
+
+        Thread.Sleep(2000);
+
+        var renew = ProcessRunner.Run("ipconfig.exe", $"/renew \"{adapterName}\"");
+        if (!renew.Ok)
+        {
+            log.Warn($"[AdapterManager] ipconfig /renew 失败({renew.ExitCode}): {renew.StdErr}");
+            return false;
+        }
+        return true;
+    }
 }
