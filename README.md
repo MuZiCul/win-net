@@ -17,6 +17,7 @@
 - **防抖防死循环**：重启网卡后等待 DHCP 完成（20s）再确认；连续失败进入长冷却（30 分钟）；多次仍失败则**停手 30 分钟后再主动重启网卡重试**，直到恢复（非永久停手）。
 - **应用层故障不误修**：链路/DNS 正常但 HTTP 被拦（SSL/防火墙）时不做无意义重启，仅记录观察。
 - **UAC 自动提权**：需要管理员权限时自动弹窗提权重启，无需手动右键。
+- **托盘菜单（手动控制）**：右键托盘图标可——开关**自动执行修复**（只监视不干预）、开关**自动连接 WiFi**、**重启网卡**、**禁用并恢复网卡**（PnP 设备级，重载驱动）、**修复 DNS**、**打开日志目录**。
 
 ### 构建
 
@@ -29,17 +30,14 @@ dotnet build -c Debug
 # 单文件发布（self-contained，免装 .NET）/ Publish single-file
 .\publish.ps1
 # 产物在 publish/：
-#   WinNetFix.exe                   固定名（供自启/日常）
-#   WinNetFix-vX.Y.Z.exe            便携版（带版本号）
-#   WinNetFix-vX.Y.Z.zip            便携版压缩包（内含固定名 WinNetFix.exe）
-#   WinNetFix-Setup-X.Y.Z.exe       安装版（Inno Setup，需另行安装 ISCC 编译）
+#   WinNetFix.exe                   单文件（供 Inno Setup 编译安装版）
+# 安装版编译（需 Inno Setup）：ISCC.exe installer\WinNetFix.iss
+#   WinNetFix-Setup-X.Y.Z.exe       安装版（唯一交付形态）
 ```
 
 ### 安装方式 / Installation
 
-**安装版（推荐）**：下载 `WinNetFix-Setup-X.Y.Z.exe`，双击安装到 `C:\Program Files\WinNetFix\`，自动注册开机自启；升级直接运行新版本覆盖安装；卸载从控制面板卸载（自动移除自启）。
-
-**便携版**：下载 `WinNetFix-vX.Y.Z.zip` 解压到固定目录（如 `D:\WinNetFix\`），运行其中的 `WinNetFix.exe --install` 注册自启（升级时解压覆盖即可，自启路径不变）。
+**安装版（唯一交付形态）**：下载 `WinNetFix-Setup-X.Y.Z.exe`，双击安装到 `C:\Program Files\WinNetFix\`，自动注册开机自启；升级直接运行新版本覆盖安装；卸载从控制面板卸载（自动移除自启）。
 
 ### 用法 / Usage
 
@@ -84,7 +82,7 @@ WinNetFix.exe --uninstall
 schtasks /Delete /TN "WinNetFix" /F
 ```
 
-- 注册后**重新登录/重启**即自动后台运行，日志写入 `%ProgramData%\WinNetFix\logs\`。
+- 注册后**重新登录/重启**即自动后台运行，日志写入**安装目录下的 `logs\` 文件夹**（如 `C:\Program Files\WinNetFix\logs\`）。
 - 若把 exe 移到新位置，需先 `--uninstall` 再在新路径 `--install`。
 - 任务名固定为 `WinNetFix`，以当前用户（需管理员权限）登录时运行。
 
@@ -115,7 +113,6 @@ schtasks /Delete /TN "WinNetFix" /F
   },
   "log": {
     "level": "Info",
-    "path": "%ProgramData%\\WinNetFix\\logs\\",
     "retentionDays": 30
   }
 }
@@ -134,7 +131,7 @@ schtasks /Delete /TN "WinNetFix" /F
 
 ### 日志 / Logs
 
-`%ProgramData%\WinNetFix\logs\winnetfix-YYYYMMDD.log`，按天滚动，默认保留 30 天。
+`<安装目录>\logs\winnetfix-YYYYMMDD.log`（**固定**在 exe 所在目录的 `logs` 文件夹，不支持自定义），按天滚动，默认保留 30 天。托盘右键"打开日志目录"可直接打开。
 
 ### 设计文档 / Design Doc
 
@@ -157,6 +154,7 @@ A background, zero-dependency, low-footprint Windows network self-heal tool. Pri
 - **Anti-thrash & stop guard**: waits for DHCP (20s) before confirming recovery; after repeated failures enters a long cooldown (30 min); on persistent failure pauses for 30 min, then **actively restarts the adapter and retries** until recovered (not a permanent stop).
 - **No false repair on app-layer faults**: when link/DNS are fine but HTTP is blocked (SSL/firewall), no pointless restart; only logs.
 - **Auto UAC elevation**: auto restarts with admin rights when needed.
+- **Tray menu (manual control)**: right-click the tray icon to toggle **auto repair** (monitor-only), toggle **auto WiFi connect**, **restart adapter**, **disable & re-enable adapter** (PnP device level, reloads driver), **fix DNS**, and **open log folder**.
 
 ### Build
 
@@ -164,14 +162,13 @@ Requires [.NET 8 SDK](https://dotnet.microsoft.com/download).
 
 ```powershell
 dotnet build -c Debug
-.\publish.ps1   # → publish/WinNetFix.exe + WinNetFix-vX.Y.Z.exe + WinNetFix-vX.Y.Z.zip
+.\publish.ps1   # → publish/WinNetFix.exe (for Inno Setup)
+# ISCC.exe installer\WinNetFix.iss  → publish/WinNetFix-Setup-X.Y.Z.exe (the only artifact)
 ```
 
 ### Installation
 
-**Installer (recommended)**: download `WinNetFix-Setup-X.Y.Z.exe`, double-click to install into `C:\Program Files\WinNetFix\` with auto-start registered; upgrades overwrite in place; uninstall via Control Panel (removes auto-start).
-
-**Portable**: download `WinNetFix-vX.Y.Z.zip`, extract to a fixed folder, run `WinNetFix.exe --install` to register auto-start (upgrades = extract over; auto-start path stays stable).
+**Installer (the only artifact)**: download `WinNetFix-Setup-X.Y.Z.exe`, double-click to install into `C:\Program Files\WinNetFix\` with auto-start registered; upgrades overwrite in place; uninstall via Control Panel (removes auto-start).
 
 ### Usage
 
@@ -204,7 +201,7 @@ WinNetFix.exe --uninstall
 schtasks /Delete /TN "WinNetFix" /F
 ```
 
-- After install, the tool auto-runs at next logon/reboot; logs go to `%ProgramData%\WinNetFix\logs\`.
+- After install, the tool auto-runs at next logon/reboot; logs go to the `logs\` folder next to the exe (e.g. `C:\Program Files\WinNetFix\logs\`).
 - If you move the exe, run `--uninstall` first, then `--install` from the new path.
 - The task name is fixed as `WinNetFix` (runs as current admin user at logon).
 
@@ -218,7 +215,7 @@ schtasks /Delete /TN "WinNetFix" /F
 
 ### Logs
 
-`%ProgramData%\WinNetFix\logs\winnetfix-YYYYMMDD.log` (daily rolling, 30-day retention by default).
+`<install-dir>\logs\winnetfix-YYYYMMDD.log` (fixed `logs` dir next to the exe; daily rolling, 30-day retention by default). Tray menu "Open log folder" opens it directly.
 
 ### Design Doc
 

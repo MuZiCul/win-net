@@ -10,6 +10,9 @@ internal static class Program
     public const string TaskName = "WinNetFix";
     private static Logger? _log;
 
+    /// <summary>日志目录：固定为 exe 所在目录下的 logs（不支持自定义）。</summary>
+    public static string LogDir => Path.Combine(AppContext.BaseDirectory, "logs");
+
     /// <summary>是否以管理员权限运行。</summary>
     public static bool IsAdministrator()
     {
@@ -25,6 +28,7 @@ internal static class Program
         }
     }
 
+    [STAThread]
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -51,7 +55,7 @@ internal static class Program
         {
             var config = Config.Load(configPath);
             _log = new Logger(
-                Environment.ExpandEnvironmentVariables(config.Log.Path),
+                Program.LogDir,
                 config.Log.RetentionDays,
                 Logger.ParseLevel(config.Log.Level));
         }

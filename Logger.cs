@@ -8,6 +8,7 @@ public sealed class Logger : IDisposable
     private readonly object _lock = new();
     private StreamWriter? _writer;
     private string? _currentDate;
+    private bool _writable;
 
     public LogLevel Level { get; set; } = LogLevel.Info;
 
@@ -16,7 +17,16 @@ public sealed class Logger : IDisposable
         _dir = dir;
         _retentionDays = retentionDays;
         Level = level;
-        Directory.CreateDirectory(_dir);
+        try
+        {
+            Directory.CreateDirectory(_dir);
+            _writable = true;
+        }
+        catch
+        {
+            // 目录不可创建（如 Program Files 下非管理员运行）时禁用落盘，不影响主流程
+            _writable = false;
+        }
     }
 
     public static LogLevel ParseLevel(string s) => s?.ToLowerInvariant() switch
@@ -37,6 +47,8 @@ public sealed class Logger : IDisposable
     {
         if (level < Level) return;
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level}] {msg}";
+        Console.WriteLine(line); // 前台模式（--status/--once）可见；后台隐藏窗口时无害
+        if (!_writable) return;
         try
         {
             lock (_lock)
@@ -45,7 +57,6 @@ public sealed class Logger : IDisposable
                 _writer!.WriteLine(line);
                 _writer!.Flush();
             }
-            Console.WriteLine(line); // 前台模式（--status/--once）可见；后台隐藏窗口时无害
         }
         catch
         {

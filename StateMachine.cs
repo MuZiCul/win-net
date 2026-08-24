@@ -35,6 +35,13 @@ public sealed class StateMachine
     private readonly ProbeLayer _probe;
     private readonly WlanManager _wlan;
     private readonly bool _verbose;   // 是否打印每个状态转换（--once 调试用）
+    private int _manualBusy;          // >0 表示手动操作执行中（Tick 需让路）
+
+    /// <summary>自动执行修复开关（托盘可切换）。false = 只探测不修复。</summary>
+    public volatile bool IsAutoRepairEnabled = true;
+
+    /// <summary>自动连接 WiFi 开关（托盘可切换）。false = 不主动碰 WiFi。</summary>
+    public volatile bool IsAutoConnectWifi = true;
 
     private int _linkFailCount;      // 链路层连续失败计数
     private int _dnsFailCount;       // DNS 层连续失败计数
@@ -60,6 +67,8 @@ public sealed class StateMachine
     /// <summary>执行一次完整 tick（探测 + 按状态决策）。由外部循环调用。</summary>
     public void Tick()
     {
+        // 手动操作进行中：自动修复让路，避免与手动操作并发操作网卡/DNS
+        if (Volatile.Read(ref _manualBusy) > 0) return;
         try
         {
             TickCore();
@@ -132,15 +141,27 @@ public sealed class StateMachine
     /// <summary>正常监测：分层探测 + 例行 WiFi 守护 + 省电复查，决定进入何状态。</summary>
     private void DoMonitoring()
     {
-        // 例行 WiFi 守护：无论有线是否正常，WiFi 未连接（含 Software Off）都主动打开并连接
-        EnsureWifiRoutine();
+        // 例行 WiFi 守护：受托盘"自动连接 WiFi"开关控制（默认开）
+        if (IsAutoConnectWifi)
+            EnsureWifiRoutine();
 
-        // 省电复查：启动时必做一次；若配置了复查间隔则周期性复查（防用户/系统把省电设置改回）
-        EnsurePowerSavingDisabled();
+        // 省电复查：受托盘"自动执行修复"开关控制（默认开）
+        if (IsAutoRepairEnabled)
+            EnsurePowerSavingDisabled();
 
         var r = _probe.Probe();
         LastProbe = r;
         _log.Info($"[Probe] seq={r.ProbeSeq} adapterUp={r.AdapterUp} ip={r.AdapterIp} gw={r.GatewayIp} gwOk={r.GatewayOk} publicOk={r.PublicOk} dnsOk={r.DnsOk} appOk={r.AppOk}");
+
+        // 托盘开关关闭"自动执行修复"：只探测、不修复，始终留在 Monitoring
+        if (!IsAutoRepairEnabled)
+        {
+            _linkFailCount = 0;
+            _dnsFailCount = 0;
+            _retryCount = 0;
+            State = FixState.Monitoring;
+            return;
+        }
 
         if (!r.AdapterUp)
         {
@@ -521,6 +542,124 @@ public sealed class StateMachine
             _retryCount = 0;
             Transition(FixState.RestartAdapter);
         }
+    }
+
+    // ==================== 托盘手动操作入口 ====================
+
+    /// <summary>手动重启网卡（接口级禁用→启用）。执行期间自动修复让路。返回是否执行成功。</summary>
+    public bool ManualRestartAdapter() => RunManual(() =>
+    {
+        var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+        if (adapter == null)
+        {
+            _log.Error("[Manual] 未找到以太网适配器，无法重启");
+            return false;
+        }
+        if (!AdapterManager.RestartAdapter(adapter.Name, _log))
+            return false;
+        LastFixTime = DateTime.Now;
+        WaitForValidIp(adapter.Name);
+        _log.Info($"[Manual] 网卡重启完成: {adapter.Name}");
+        ResetFailCounters();
+        return true;
+    });
+
+    /// <summary>手动禁用并恢复网卡（PnP 设备级，重载驱动；PnP 不可用回退接口级）。返回是否执行成功。</summary>
+    public bool ManualDisableEnableAdapter() => RunManual(() =>
+    {
+        var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+        if (adapter == null)
+        {
+            _log.Error("[Manual] 未找到以太网适配器，无法禁用/恢复");
+            return false;
+        }
+
+        var pnpId = AdapterManager.GetWiredPnpDeviceId(adapter.Name, _log);
+        if (pnpId != null && AdapterManager.RestartAdapterPnp(pnpId, _log))
+        {
+            LastFixTime = DateTime.Now;
+            WaitForValidIp(adapter.Name);
+            _log.Info($"[Manual] 网卡禁用/恢复完成(PnP): {adapter.Name}");
+            ResetFailCounters();
+            return true;
+        }
+
+        // PnP 不可用回退接口级
+        _log.Warn("[Manual] PnP 禁用/恢复不可用，回退接口级重启");
+        return ManualRestartAdapter();
+    });
+
+    /// <summary>手动修复 DNS：flushdns → 重探 → 仍不通则切公共 DNS → 重探。返回是否最终恢复正常。</summary>
+    public bool ManualFixDns() => RunManual(() =>
+    {
+        DnsManager.FlushDns(_log);
+        Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.DnsWaitSec));
+        var r = _probe.Probe();
+        LastProbe = r;
+        if (r.AllOk)
+        {
+            _log.Info("[Manual] flushdns 后 DNS 恢复正常");
+            ResetFailCounters();
+            return true;
+        }
+
+        if (r.DnsFault && !r.LinkFault && _config.Repair.FallbackPublicDns)
+        {
+            var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
+            if (adapter == null)
+            {
+                _log.Error("[Manual] 未找到以太网适配器，无法切 DNS");
+                ResetFailCounters();
+                return false;
+            }
+            if (DnsManager.SetPublicDns(adapter.Name, _config.Repair.PublicDns, _log))
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.DnsWaitSec));
+                var r2 = _probe.Probe();
+                LastProbe = r2;
+                if (r2.AllOk)
+                {
+                    _log.Info("[Manual] 切换公共 DNS 后恢复上网");
+                    ResetFailCounters();
+                    return true;
+                }
+                _log.Warn("[Manual] 切换公共 DNS 后仍不通");
+            }
+        }
+        else
+        {
+            _log.Warn("[Manual] DNS 修复后仍异常（链路或应用层问题，非 DNS 层）");
+        }
+        ResetFailCounters();
+        return false;
+    });
+
+    /// <summary>在手动操作互斥区内执行动作（Tick 自动让路）。</summary>
+    private bool RunManual(Func<bool> action)
+    {
+        Interlocked.Increment(ref _manualBusy);
+        try
+        {
+            return action();
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"[Manual] 手动操作异常: {ex}");
+            return false;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _manualBusy);
+        }
+    }
+
+    /// <summary>手动操作成功后重置失败计数，避免状态机立即误判。</summary>
+    private void ResetFailCounters()
+    {
+        _linkFailCount = 0;
+        _dnsFailCount = 0;
+        _retryCount = 0;
+        _escalateCount = 0;
     }
 
     /// <summary>轮询等待适配器拿到非 169.254 的合法 IP，超时返回 false。</summary>

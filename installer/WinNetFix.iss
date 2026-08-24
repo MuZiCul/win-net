@@ -66,5 +66,5 @@ begin
   if CurPageID = wpFinished then
     WizardForm.FinishedLabel.Caption := 'WinNetFix {#MyAppVersion} 安装完成。' + #13#10 +
       '工具将常驻后台自动修复网络。' + #13#10 +
-      '日志位置: %ProgramData%\WinNetFix\logs\';
+      '日志位置: {app}\logs\';
 end;

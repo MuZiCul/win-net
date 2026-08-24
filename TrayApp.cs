@@ -1,22 +1,20 @@
 using System.Diagnostics;
-using System.Reflection;
-using System.Windows.Forms;
 
 namespace WinNetFix;
 
 /// <summary>
-/// 系统托盘：右下角图标 + 菜单（开机自启开关 / 卸载 / 退出）。
-/// 开机自启开关勾选/取消时自动执行计划任务注册/移除。
+/// 系统托盘：右下角图标 + 原生菜单（开机自启开关 / 显示状态 / 卸载 / 退出）。
+/// 基于纯 P/Invoke 的 TrayIcon，不依赖 WinForms。
 /// </summary>
 public sealed class TrayApp : IDisposable
 {
-    private readonly NotifyIcon _icon;
-    private readonly ToolStripMenuItem _autoStartItem;
+    private readonly TrayIcon _tray;
     private readonly Logger _log;
     private readonly string _exePath;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _workerTask;
     private StateMachine? _machine;
+    private bool _exitStarted;
 
     public event Action? ExitRequested;
 
@@ -25,38 +23,22 @@ public sealed class TrayApp : IDisposable
         _log = log;
         _exePath = Environment.ProcessPath ?? "WinNetFix.exe";
 
-        _icon = new NotifyIcon
+        _tray = new TrayIcon(log)
         {
-            Icon = LoadIcon(),
-            Text = "WinNetFix 网络自愈",
-            Visible = true,
+            AutoStartCheckedQuery = IsAutoStartRegistered,
+            AutoRepairCheckedQuery = () => _machine?.IsAutoRepairEnabled ?? true,
+            AutoWifiCheckedQuery = () => _machine?.IsAutoConnectWifi ?? true,
         };
-
-        var menu = new ContextMenuStrip();
-        _autoStartItem = new ToolStripMenuItem("开机自启", null, (_, _) => ToggleAutoStart())
-        {
-            CheckOnClick = true,
-            Checked = IsAutoStartRegistered(),
-        };
-        menu.Items.Add(_autoStartItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("卸载", null, (_, _) => Uninstall()));
-        menu.Items.Add(new ToolStripMenuItem("退出", null, (_, _) => Exit()));
-
-        _icon.ContextMenuStrip = menu;
-        _icon.DoubleClick += (_, _) => ShowStatus();
+        _tray.Activated += ShowStatus;
+        _tray.Command += OnMenuCommand;
 
         // 后台运行状态机
         _machine = new StateMachine(config, log);
         _workerTask = Task.Run(() => RunWorker(config));
     }
 
-    /// <summary>常驻主线程：阻塞直到退出（由调用方 Application.Run 驱动，或本类阻塞）。</summary>
-    public void Run()
-    {
-        // 用 Application.Run 提供消息泵（NotifyIcon 需要）
-        Application.Run();
-    }
+    /// <summary>常驻：阻塞在消息循环直到退出。</summary>
+    public void Run() => _tray.Run();
 
     private void RunWorker(Config config)
     {
@@ -75,45 +57,98 @@ public sealed class TrayApp : IDisposable
         }
     }
 
-    /// <summary>从内嵌 PNG 资源加载图标（缩放到 32x32 后经 GetHicon 转 Icon）。失败回退系统图标。</summary>
-    private static Icon LoadIcon()
+    private void OnMenuCommand(int cmd)
+    {
+        switch (cmd)
+        {
+            case TrayIcon.CmdAutoStart:
+                ToggleAutoStart();
+                break;
+            case TrayIcon.CmdAutoRepair:
+                ToggleAutoRepair();
+                break;
+            case TrayIcon.CmdAutoWifi:
+                ToggleAutoWifi();
+                break;
+            case TrayIcon.CmdRestartAdapter:
+                RunManualAction("重启网卡", () => _machine!.ManualRestartAdapter());
+                break;
+            case TrayIcon.CmdDisableEnable:
+                if (NativeBox.YesNo("确定禁用并恢复有线网卡吗？\n将执行设备级禁用→启用（重载驱动），期间会短暂断网。", "WinNetFix"))
+                    RunManualAction("禁用并恢复网卡", () => _machine!.ManualDisableEnableAdapter());
+                break;
+            case TrayIcon.CmdFixDns:
+                RunManualAction("修复 DNS", () => _machine!.ManualFixDns());
+                break;
+            case TrayIcon.CmdOpenLogDir:
+                OpenLogDir();
+                break;
+            case TrayIcon.CmdShowStatus:
+                ShowStatus();
+                break;
+            case TrayIcon.CmdUninstall:
+                Uninstall();
+                break;
+            case TrayIcon.CmdExit:
+                Exit();
+                break;
+        }
+    }
+
+    /// <summary>切换"自动执行修复"开关（只写状态机标志，不持久化）。</summary>
+    private void ToggleAutoRepair()
+    {
+        if (_machine == null) return;
+        _machine.IsAutoRepairEnabled = !_machine.IsAutoRepairEnabled;
+        _log.Info($"[Tray] 自动执行修复开关 → {(_machine.IsAutoRepairEnabled ? "开" : "关")}");
+    }
+
+    /// <summary>切换"自动连接 WiFi"开关（只写状态机标志，不持久化）。</summary>
+    private void ToggleAutoWifi()
+    {
+        if (_machine == null) return;
+        _machine.IsAutoConnectWifi = !_machine.IsAutoConnectWifi;
+        _log.Info($"[Tray] 自动连接 WiFi 开关 → {(_machine.IsAutoConnectWifi ? "开" : "关")}");
+    }
+
+    /// <summary>在后台线程执行手动操作，前后用气泡反馈结果（不阻塞托盘消息循环）。</summary>
+    private void RunManualAction(string label, Func<bool> action)
+    {
+        _tray.ShowBalloon("WinNetFix", $"正在{label}…");
+        Task.Run(() =>
+        {
+            try
+            {
+                var ok = action();
+                _tray.ShowBalloon("WinNetFix", $"{label}: {(ok ? "完成" : "失败，详见日志")}");
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"[Tray] {label}异常: {ex}");
+                _tray.ShowBalloon("WinNetFix", $"{label}异常: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>用资源管理器打开日志目录（exe 目录/logs）。</summary>
+    private void OpenLogDir()
     {
         try
         {
-            var asm = Assembly.GetExecutingAssembly();
-            var name = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
-            if (name != null)
+            Directory.CreateDirectory(Program.LogDir);
+            Process.Start(new ProcessStartInfo
             {
-                using var stream = asm.GetManifestResourceStream(name);
-                if (stream != null)
-                {
-                    using var bmp = new System.Drawing.Bitmap(stream);
-                    using var small = new System.Drawing.Bitmap(bmp, new System.Drawing.Size(32, 32));
-                    var hIcon = small.GetHicon();
-                    try
-                    {
-                        return Icon.FromHandle(hIcon);
-                    }
-                    catch
-                    {
-                        // FromHandle 失败时释放 hIcon 避免泄漏
-                        NativeMethods.DestroyIcon(hIcon);
-                        throw;
-                    }
-                }
-            }
+                FileName = "explorer.exe",
+                Arguments = $"\"{Program.LogDir}\"",
+                UseShellExecute = true,
+            });
+            _log.Info($"[Tray] 打开日志目录: {Program.LogDir}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"图标加载失败: {ex.Message}");
+            _log.Error($"[Tray] 打开日志目录失败: {ex.Message}");
+            NativeBox.Error($"打开日志目录失败: {ex.Message}");
         }
-        return SystemIcons.Application;
-    }
-
-    private static class NativeMethods
-    {
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        public static extern bool DestroyIcon(IntPtr hIcon);
     }
 
     /// <summary>开机自启是否已注册。</summary>
@@ -128,33 +163,31 @@ public sealed class TrayApp : IDisposable
     {
         try
         {
-            if (_autoStartItem.Checked)
+            var wantOn = !IsAutoStartRegistered();
+            if (wantOn)
             {
                 var ok = Program.InstallTaskInternal(_exePath, _log);
-                _autoStartItem.Checked = ok;
                 if (ok) _log.Info("[Tray] 已注册开机自启");
-                else MessageBox.Show("注册开机自启失败（需要管理员权限）", "WinNetFix", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else NativeBox.Warning("注册开机自启失败（需要管理员权限）");
             }
             else
             {
                 var ok = Program.UninstallTaskInternal(_log);
-                _autoStartItem.Checked = !ok;
                 if (ok) _log.Info("[Tray] 已移除开机自启");
-                else MessageBox.Show("移除开机自启失败", "WinNetFix", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else NativeBox.Warning("移除开机自启失败");
             }
         }
         catch (Exception ex)
         {
             _log.Error($"[Tray] 切换自启异常: {ex}");
-            MessageBox.Show($"操作失败: {ex.Message}", "WinNetFix", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            NativeBox.Error($"操作失败: {ex.Message}");
         }
     }
 
     /// <summary>卸载：移除自启 + 调用卸载程序（安装版 unins000.exe；便携版提示手动删除）。</summary>
     private void Uninstall()
     {
-        if (MessageBox.Show("确定卸载 WinNetFix 吗？\n将移除开机自启并退出。", "卸载 WinNetFix",
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+        if (!NativeBox.YesNo("确定卸载 WinNetFix 吗？\n将移除开机自启并退出。", "卸载 WinNetFix"))
             return;
 
         _log.Info("[Tray] 用户选择卸载");
@@ -167,15 +200,14 @@ public sealed class TrayApp : IDisposable
         if (unins != null && File.Exists(unins))
         {
             _log.Info($"[Tray] 启动卸载程序: {unins}");
-            _icon.Visible = false;
+            _tray.Exit();
             try { Process.Start(new ProcessStartInfo { FileName = unins, UseShellExecute = true }); } catch { }
             Exit();
         }
         else
         {
             // 便携版：仅移除自启 + 提示手动删除
-            MessageBox.Show("已移除开机自启。\n便携版无需卸载程序，删除程序文件夹即可。", "WinNetFix",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            NativeBox.Info("已移除开机自启。\n便携版无需卸载程序，删除程序文件夹即可。");
             Exit();
         }
     }
@@ -187,12 +219,12 @@ public sealed class TrayApp : IDisposable
         {
             if (_machine?.LastProbe == null)
             {
-                _icon.ShowBalloonTip(3000, "WinNetFix", "正在运行中...", ToolTipIcon.Info);
+                _tray.ShowBalloon("WinNetFix", "正在运行中...");
                 return;
             }
             var r = _machine.LastProbe;
             var state = r.AllOk ? "正常" : r.DhcpFault ? "DHCP故障(169.254)" : r.LinkFault ? "链路故障" : r.DnsFault ? "DNS故障" : "异常";
-            _icon.ShowBalloonTip(3000, "WinNetFix", $"状态: {state}\nIP: {r.AdapterIp ?? "-"}", ToolTipIcon.Info);
+            _tray.ShowBalloon("WinNetFix", $"状态: {state}\nIP: {r.AdapterIp ?? "-"}");
         }
         catch (Exception ex)
         {
@@ -202,11 +234,11 @@ public sealed class TrayApp : IDisposable
 
     private void Exit()
     {
+        if (_exitStarted) return;
+        _exitStarted = true;
         _log.Info("[Tray] 用户选择退出");
         _cts.Cancel();
-        _icon.Visible = false;
-        _icon.Dispose();
-        Application.Exit();
+        _tray.Exit();
         ExitRequested?.Invoke();
     }
 
@@ -214,7 +246,7 @@ public sealed class TrayApp : IDisposable
     {
         _cts.Cancel();
         try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        _icon.Dispose();
+        _tray.Dispose();
         _cts.Dispose();
     }
 }

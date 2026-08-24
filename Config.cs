@@ -88,7 +88,8 @@ public sealed class Config
     public sealed class LogConfig
     {
         public string Level { get; set; } = "Info";
-        public string Path { get; set; } = @"%ProgramData%\WinNetFix\logs\";
+
+        /// <summary>日志保留天数。目录固定为 exe 所在目录下的 logs（不支持自定义）。</summary>
         public int RetentionDays { get; set; } = 30;
     }
 

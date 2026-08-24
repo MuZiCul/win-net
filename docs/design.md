@@ -31,7 +31,7 @@
 |------|--------|
 | 常驻内存 | < 15 MB（.NET 单文件，无 UI 线程） |
 | CPU 占用 | 空闲时 ≈ 0%，探测瞬间 < 1% |
-| 磁盘占用 | 单 exe < 5 MB（Release 裁剪后） |
+| 磁盘占用 | 单 exe ~15 MB（self-contained + Trim + 单文件） |
 | 默认探测间隔 | 15 s |
 | 断联判定 | 连续 2 次探测失败（约 30 s） |
 | 恢复确认 | 重连后连续 2 次探测成功 |
@@ -41,7 +41,7 @@
 ## 2. 运行形态
 
 ### 2.1 交付物
-- 单个可执行文件 `WinNetFix.exe`（C# / .NET 8，发布为 `self-contained` + `PublishSingleFile` + `Trim` + `ReadyToRun`）。
+- 单个可执行文件 `WinNetFix.exe`（C# / .NET 8，发布为 `self-contained` + `PublishSingleFile` + `PublishTrimmed`）。
 - 启动方式：隐藏控制台窗口（`WindowStyle = Hidden`，或编译为 Windows 应用无控制台）。
 - 计划任务自启：提供 `--install` / `--uninstall` 参数注册/注销 Task Scheduler 任务（触发器：登录时 / 系统启动时；权限：最高可用）。
 
@@ -56,7 +56,25 @@
 | `--status` | 打印当前状态机状态与最近日志 |
 | `--version` | 版本号 |
 
-### 2.3 配置文件（`config.json`）
+### 2.3 托盘菜单
+`--run` 常驻时右下角托盘图标，右键菜单：
+
+| 菜单项 | 类型 | 行为 |
+|---|---|---|
+| 开机自启 | 开关 | 注册/注销计划任务 |
+| 自动执行修复 | 开关 | 关闭后只探测不修复（不重启网卡/修 DNS/WiFi），默认开 |
+| 自动连接 WiFi | 开关 | 关闭后不主动碰 WiFi，默认开 |
+| 重启网卡 | 动作 | 接口级禁用→启用，后台执行，气泡反馈 |
+| 禁用并恢复网卡 | 动作 | PnP 设备级禁用→启用（重载驱动），需确认，PnP 不可用回退接口级 |
+| 修复 DNS | 动作 | flushdns → 仍不通切公共 DNS → 气泡反馈 |
+| 打开日志目录 | 动作 | 资源管理器打开 `exe目录\logs` |
+| 显示状态 | 动作 | 气泡显示当前网络状态/IP |
+| 卸载 | 动作 | 移除自启 + 卸载程序/提示手动删 |
+| 退出 | 动作 | 结束常驻进程 |
+
+开关仅运行时生效（不写入 config.json）；手动动作在后台线程执行，执行期间自动修复让路（防并发操作网卡/DNS）。
+
+### 2.4 配置文件（`config.json`）
 ```json
 {
   "probe": {
@@ -88,7 +106,6 @@
   },
   "log": {
     "level": "Info",
-    "path": "%ProgramData%\\WinNetFix\\logs\\",
     "retentionDays": 30
   }
 }
@@ -393,7 +410,7 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 
 1. **权限最小化**：仅在需要操作系统网络栈时提权；普通探测不需要。安装计划任务时请求提权一次。
 2. **无数据外发**：探测仅访问 `msftconnecttest.com`（微软官方连通性检测）与用户可配置的 IP；不收集 MAC、SSID 列表、地理位置等并上传。
-3. **日志脱敏**：日志不记录 WiFi 密码；SSID 以明文记录属必要诊断信息，文件权限限制为管理员读写（`%ProgramData%` 默认 ACL）。
+3. **日志脱敏**：日志不记录 WiFi 密码；SSID 以明文记录属必要诊断信息。日志目录**固定为安装目录 `logs\`（exe 所在目录，不支持自定义）**，安装版位于 Program Files 下时其 ACL 由 Program Files 继承；若目录不可写（如非管理员运行）则仅输出控制台、不落盘，不影响主流程。
 4. **防火墙**：探测使用出站 80/443 + ICMP，不开放任何入站端口，不关闭防火墙。
 5. **可逆性**：所有修复动作开始前记录原状态（适配器状态、已连接 SSID），可在日志中审计；不修改系统永久配置（不重置 Winsock/DNS）。
 6. **自启动透明**：计划任务名称 `WinNetFix` 清晰可见，可一键 `--uninstall` 移除。
@@ -402,7 +419,7 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 
 ## 9. 日志与可观测性
 
-- 滚动日志：`%ProgramData%\WinNetFix\logs\winnetfix-YYYYMMDD.log`，按 `retentionDays` 清理。
+- 滚动日志：`<安装目录>\logs\winnetfix-YYYYMMDD.log`（相对 exe 的 `logs` 目录），按 `retentionDays` 清理。
 - 日志字段：`[时间戳] [级别] [状态机状态] 消息`。
 - `--status` 输出：当前状态、最近 5 次探测结果、上次修复时间、重试计数。
 - 可选：写入 Windows 事件日志（Application 下 `WinNetFix` 源），便于集中排障。
@@ -436,7 +453,6 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 - 邮件/Webhook 通知断网事件。
 - 多 SSID 优先级列表与故障转移。
 - 网卡驱动自动更新检测。
-- 系统托盘图标（轻量，会略微增加内存）。
 
 ---
 

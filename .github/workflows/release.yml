@@ -29,32 +29,12 @@ jobs:
         shell: pwsh
         id: version
         run: |
-          # 从 tag 提取版本（v0.1.2 → 0.1.2），并生成带版本的文件名
+          # 从 tag 提取版本（v0.1.2 → 0.1.2），并生成安装版文件名
           $tag = "${env:GITHUB_REF}" -replace '^refs/tags/', ''
           $ver = $tag.TrimStart('v')
           "version=$ver" >> $env:GITHUB_OUTPUT
           "setup_name=WinNetFix-Setup-$ver.exe" >> $env:GITHUB_OUTPUT
-          "exe_name=WinNetFix-$tag.exe" >> $env:GITHUB_OUTPUT
-          "zip_name=WinNetFix-$tag.zip" >> $env:GITHUB_OUTPUT
           Write-Host "tag=$tag ver=$ver"
-
-      - name: Rename exe with version (portable)
-        shell: pwsh
-        run: |
-          $src = './publish/WinNetFix.exe'
-          $dst = "./publish/${{ steps.version.outputs.exe_name }}"
-          Copy-Item $src $dst -Force
-          Get-Item $dst | Select-Object Name, Length
-
-      - name: Create portable zip
-        shell: pwsh
-        run: |
-          $zip = "./publish/${{ steps.version.outputs.zip_name }}"
-          $staging = Join-Path $env:RUNNER_TEMP "winnetfix-portable"
-          New-Item -ItemType Directory -Path $staging -Force | Out-Null
-          Copy-Item './publish/WinNetFix.exe' (Join-Path $staging 'WinNetFix.exe')
-          Compress-Archive -Path (Join-Path $staging 'WinNetFix.exe') -DestinationPath $zip -Force
-          Get-Item $zip | Select-Object Name, Length
 
       - name: Install Inno Setup
         shell: pwsh
@@ -94,9 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $assets = @(
-            "./publish/${{ steps.version.outputs.setup_name }}",
-            "./publish/${{ steps.version.outputs.exe_name }}",
-            "./publish/${{ steps.version.outputs.zip_name }}"
+            "./publish/${{ steps.version.outputs.setup_name }}"
           )
           $lines = foreach ($f in $assets) {
             $hash = Get-FileHash -Algorithm SHA256 $f
@@ -111,8 +89,6 @@ jobs:
         with:
           files: |
             publish/WinNetFix-Setup-*.exe
-            publish/WinNetFix-v*.exe
-            publish/WinNetFix-v*.zip
             publish/SHA256.txt
           draft: true
           generate_release_notes: true
