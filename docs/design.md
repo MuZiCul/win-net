@@ -385,7 +385,9 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 
 **设计要点**：
 - hosts 写入仅管理标记段内条目（幂等重写），不触碰用户自定义条目
+- **编码保护**：读写前检测 hosts 编码（BOM→UTF8；无 BOM 严格 UTF-8 解码尝试→UTF8；失败→系统 ANSI/GBK），保证用户中文注释不被 UTF-8 误解码损坏
 - 单个域名无可用 IP 时跳过（不写无效条目），全部失败则不修改 hosts
+- 写入成功后执行 `ipconfig /flushdns`，确保 hosts 立即生效
 - 域名解析超时 5s/源、测速超时 4s/IP，均有界不阻塞
 - 需要管理员权限（写 `%SystemRoot%\System32\drivers\etc\hosts`）
 
@@ -395,8 +397,10 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 - **纯 P/Invoke 实现**：`CreateWindowEx` + RichEdit 控件（`RICHEDIT50W`，需先 `LoadLibrary("Msftedit.dll")`），消息循环复用托盘窗口的 `GetMessage` 循环（关闭进度窗口不退出托盘）。
 - **跨线程安全**：后台修复线程通过 `SendMessage(EM_SETSEL/EM_REPLACESEL)` 追加文本；`AppendLine(string, ProgressColor)` 支持按行着色（`EM_SETCHARFORMAT` + `CHARFORMAT2W`）。
 - **彩色符号**：`✔`=成功（绿）、`✘`=失败（红）、`►`=候选/关键节点（蓝），符号继承行颜色。
-- **生命周期**：由主线程创建、字段持有引用防 GC；用户手动关闭；窗口标题栏/任务栏显示 exe 彩色应用图标（`ExtractIconEx` + `WM_SETICON`）。
+- **生命周期**：由主线程创建、字段持有引用防 GC；用户手动关闭；窗口标题栏/任务栏显示 exe 彩色应用图标（`ExtractIconEx` + `WM_SETICON`）；`WM_DESTROY` 释放图标句柄（防泄漏）。
 - **回调协议**：各操作方法接受 `Action<string, ProgressColor>? progress` 逐阶段上报；`TrayApp.RunManualAction` 统一创建窗口 + 完成后 `NativeBox` 详情弹窗。
+- **操作代次标记**：`TrayApp._opToken` 递增，旧任务完成后若代次不匹配则不弹详情框（防连续操作时旧结果干扰）。
+- **标题状态标注**：完成后 `SetTitle` 更新为"（完成）/（失败）/（异常）"（`SetWindowTextW` 跨线程安全）。
 - **关键约束**：进度窗口 `WM_DESTROY` 不 `PostQuitMessage`（否则会连带退出托盘消息循环）。
 
 ---

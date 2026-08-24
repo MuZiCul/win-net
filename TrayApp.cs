@@ -16,6 +16,7 @@ public sealed class TrayApp : IDisposable
     private StateMachine? _machine;
     private bool _exitStarted;
     private ProgressWindow? _githubWin; // 持有引用防 GC，窗口由用户手动关闭
+    private int _opToken;               // 手动操作代次标记：新操作递增，旧任务完成后不弹框
 
     public event Action? ExitRequested;
 
@@ -132,19 +133,29 @@ public sealed class TrayApp : IDisposable
         var win = new ProgressWindow($"WinNetFix - {label}");
         _githubWin = win; // 持有引用防 GC；窗口由用户手动关闭
         win.AppendLine($"开始{label}…");
+        var token = ++_opToken;
         Task.Run(() =>
         {
             try
             {
                 var (ok, msg) = action((t, c) => win.AppendLine(t, c));
-                NativeBox.Info(msg, ok ? $"{label}完成" : $"{label}失败");
-                _tray.ShowBalloon("WinNetFix", $"{label}: {(ok ? "完成" : "失败")}");
+                if (token == _opToken)
+                {
+                    // 仍是最新操作：更新标题 + 弹详情框
+                    win.SetTitle($"WinNetFix - {label}（{(ok ? "完成" : "失败")}）");
+                    NativeBox.Info(msg, ok ? $"{label}完成" : $"{label}失败");
+                    _tray.ShowBalloon("WinNetFix", $"{label}: {(ok ? "完成" : "失败")}");
+                }
             }
             catch (Exception ex)
             {
                 _log.Error($"[Tray] {label}异常: {ex}");
                 win.AppendLine($"异常: {ex.Message}");
-                NativeBox.Error($"{label}异常: {ex.Message}");
+                if (token == _opToken)
+                {
+                    win.SetTitle($"WinNetFix - {label}（异常）");
+                    NativeBox.Error($"{label}异常: {ex.Message}");
+                }
             }
         });
     }
@@ -156,19 +167,28 @@ public sealed class TrayApp : IDisposable
         _githubWin?.Dispose(); // 关闭上一个遗留窗口
         var win = new ProgressWindow("WinNetFix - 修复 GitHub 连接");
         _githubWin = win; // 持有引用防 GC；窗口由用户手动关闭
+        var token = ++_opToken;
         Task.Run(async () =>
         {
             try
             {
                 var (ok, msg) = await GithubHosts.Fix(_log, (t, c) => win.AppendLine(t, c));
-                NativeBox.Info(msg, ok ? "GitHub 修复完成" : "GitHub 修复失败");
-                _tray.ShowBalloon("WinNetFix", $"修复 GitHub 连接: {(ok ? "完成" : "失败")}");
+                if (token == _opToken)
+                {
+                    win.SetTitle($"WinNetFix - 修复 GitHub 连接（{(ok ? "完成" : "失败")}）");
+                    NativeBox.Info(msg, ok ? "GitHub 修复完成" : "GitHub 修复失败");
+                    _tray.ShowBalloon("WinNetFix", $"修复 GitHub 连接: {(ok ? "完成" : "失败")}");
+                }
             }
             catch (Exception ex)
             {
                 _log.Error($"[Tray] 修复 GitHub 连接异常: {ex}");
                 win.AppendLine($"异常: {ex.Message}");
-                NativeBox.Error($"修复 GitHub 连接异常: {ex.Message}");
+                if (token == _opToken)
+                {
+                    win.SetTitle("WinNetFix - 修复 GitHub 连接（异常）");
+                    NativeBox.Error($"修复 GitHub 连接异常: {ex.Message}");
+                }
             }
         });
     }

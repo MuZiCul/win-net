@@ -237,9 +237,23 @@ public sealed class WlanManager
         var m = Regex.Match(r.StdOut, @"(?im)^\s*(Name|名称)\s*:\s*(.+)$");
         if (m.Success) return m.Groups[2].Value.Trim();
 
+        // 回退：从接口列表中解析无线接口名。
+        // 行格式（中英兼容）: "已启用  已连接  专用  无线局域网连接 2" / "Enabled Connected Dedicated Wi-Fi 2"
+        // 接口名是最后一列（可能含空格），不能只取前缀。
         var r2 = ProcessRunner.RunNetsh("interface show interface");
-        var m2 = Regex.Match(r2.StdOut, @"(?im)^\s*(WLAN|Wi-Fi|WiFi|无线局域网连接)\b");
-        if (m2.Success) return m2.Value.Trim();
+        foreach (var line in r2.StdOut.Split('\n'))
+        {
+            // 匹配至少 3 列后的最后一个非空字段（接口名）；跳过表头/分隔线
+            var m2 = Regex.Match(line.Trim(), @"(?i)^\S+\s+\S+\s+\S+\s+(.+)$");
+            if (!m2.Success) continue;
+            var name = m2.Groups[1].Value.Trim();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (name.Equals("Interface Name", StringComparison.OrdinalIgnoreCase)) continue;
+            if (name.Equals("接口名称", StringComparison.Ordinal)) continue;
+            // 无线接口特征：含 WLAN/Wi-Fi/WiFi/无线/Wireless
+            if (Regex.IsMatch(name, @"(?i)(WLAN|Wi-Fi|WiFi|无线|Wireless)"))
+                return name;
+        }
 
         return null;
     }

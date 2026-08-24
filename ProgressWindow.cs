@@ -125,6 +125,9 @@ public sealed class ProgressWindow : IDisposable
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool SetWindowText(IntPtr hWnd, string lpString);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, string lParam);
 
     [DllImport("user32.dll")]
@@ -205,6 +208,13 @@ public sealed class ProgressWindow : IDisposable
         }
     }
 
+    /// <summary>更新窗口标题（可跨线程调用，用于标注运行中/已完成）。窗口已关闭时忽略。</summary>
+    public void SetTitle(string title)
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        try { SetWindowText(_hwnd, title); } catch { }
+    }
+
     /// <summary>追加一行文本（默认颜色）。可跨线程调用，窗口已关闭时忽略。</summary>
     public void AppendLine(string text) => AppendLine(text, ProgressColor.Default);
 
@@ -270,6 +280,12 @@ public sealed class ProgressWindow : IDisposable
                 // 只清理句柄；不 PostQuitMessage（进度窗口关闭不应退出托盘消息循环）
                 _hwnd = IntPtr.Zero;
                 _hEdit = IntPtr.Zero;
+                // 用户手动关窗时立即释放图标（Dispose 有判零保护，不会重复释放）
+                if (_hIcon != IntPtr.Zero)
+                {
+                    DestroyIcon(_hIcon);
+                    _hIcon = IntPtr.Zero;
+                }
                 return IntPtr.Zero;
             case WM_GETICON:
                 // 确保任务栏/缩略图也显示应用图标

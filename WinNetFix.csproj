@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>WinNetFix</AssemblyName>
     <RootNamespace>WinNetFix</RootNamespace>
-    <Version>0.1.5</Version>
+    <Version>0.1.6</Version>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>

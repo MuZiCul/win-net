@@ -52,9 +52,6 @@ public static class GithubHosts
         IReadOnlyList<string> LocalIps,  // 本机 DNS 解析结果
         IReadOnlyList<string> TrueIps);  // DoH 解析结果（可信）
 
-    /// <summary>解析失败域名的判定（DoH 全部不可达时降级提示）。</summary>
-    private sealed record ResolvedDomain(string Domain, List<string> Ips, bool ViaDoh);
-
     // ==================== 诊断 ====================
 
     /// <summary>诊断 GitHub 连通性：TCP 可达性 + DNS 污染比对。</summary>
@@ -88,8 +85,8 @@ public static class GithubHosts
         var tasks = Domains.Select(d => ResolveOne(d, log, progress)).ToArray();
         var results = await Task.WhenAll(tasks);
 
-        var entries = results.Where(r => r.Entry != null)
-                             .Select(r => (r.Domain, r.Entry!.Value.Ip, r.Entry.Value.Ms))
+        var entries = results.Where(r => r.Ip != null)
+                             .Select(r => (r.Domain, Ip: r.Ip!, Ms: r.Ms))
                              .OrderBy(e => e.Domain, StringComparer.OrdinalIgnoreCase)
                              .ToList();
         var failed = results.Where(r => r.Failed != null)
@@ -110,6 +107,10 @@ public static class GithubHosts
             progress?.Invoke($"写入失败：{write.Msg}", ProgressColor.Fail);
             return (false, write.Msg);
         }
+
+        // 清除 DNS 客户端缓存，确保 hosts 立即生效
+        progress?.Invoke("刷新 DNS 缓存（flushdns）…", ProgressColor.Info);
+        DnsManager.FlushDns(log);
 
         var msg = $"已写入 {entries.Count} 个域名到 hosts：\n" +
                   string.Join("\n", entries.Select(e => $"  {e.Ip}  {e.Domain}"));
@@ -132,29 +133,31 @@ public static class GithubHosts
             }
 
             progress?.Invoke("读取 hosts…", ProgressColor.Info);
-            var lines = File.ReadAllLines(HostsPath);
+            var (lines, enc) = ReadHostsWithEncoding();
             var inBlock = false;
+            var foundBegin = false;   // 存在 BeginTag（即使无 EndTag 也要清理）
+            var foundEnd = false;
             var kept = new List<string>();
-            var removed = 0;
             foreach (var line in lines)
             {
-                if (line.Trim().Equals(BeginTag, StringComparison.Ordinal)) { inBlock = true; continue; }
-                if (line.Trim().Equals(EndTag, StringComparison.Ordinal)) { inBlock = false; removed++; continue; }
+                if (line.Trim().Equals(BeginTag, StringComparison.Ordinal)) { inBlock = true; foundBegin = true; continue; }
+                if (line.Trim().Equals(EndTag, StringComparison.Ordinal)) { inBlock = false; foundEnd = true; continue; }
                 if (!inBlock) kept.Add(line);
             }
 
-            if (removed == 0)
+            if (!foundBegin && !foundEnd)
             {
                 log.Info("[GithubHosts] hosts 中没有 WinNetFix 标记段");
                 progress?.Invoke("hosts 中没有 WinNetFix 修复条目，无需还原", ProgressColor.Default);
                 return (true, "hosts 中没有 WinNetFix 修复条目，无需还原");
             }
 
-            progress?.Invoke($"移除 {removed} 段 WinNetFix 条目…", ProgressColor.Info);
-            File.WriteAllLines(HostsPath, kept);
-            log.Info($"[GithubHosts] 已还原 hosts（移除 {removed} 段 WinNetFix 条目）");
+            progress?.Invoke("移除 WinNetFix GitHub 条目…", ProgressColor.Info);
+            File.WriteAllLines(HostsPath, kept, enc);
+            var restored = foundBegin ? "已还原 hosts（移除 WinNetFix 修复条目）" : "已清理 hosts 中残留的 WinNetFix 标记";
+            log.Info($"[GithubHosts] {restored} (begin={foundBegin}, end={foundEnd})");
             progress?.Invoke("还原完成", ProgressColor.Success);
-            return (true, "已还原 hosts（移除 WinNetFix 修复条目）");
+            return (true, restored);
         }
         catch (Exception ex)
         {
@@ -165,6 +168,37 @@ public static class GithubHosts
     }
 
     // ==================== hosts 写入 ====================
+
+    /// <summary>
+    /// 检测 hosts 文件编码：UTF-8 BOM → UTF8；无 BOM 且可严格 UTF-8 解码 → UTF8(无BOM)；
+    /// 否则回退系统 ANSI（中文系统 GBK/936）。保证中文注释不被破坏。
+    /// </summary>
+    private static Encoding DetectHostsEncoding()
+    {
+        try
+        {
+            var bytes = File.ReadAllBytes(HostsPath);
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                return new UTF8Encoding(true); // 有 BOM 的 UTF-8
+
+            // 无 BOM：尝试严格 UTF-8 解码，遇非法字节说明是 ANSI
+            _ = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes);
+            return new UTF8Encoding(false);
+        }
+        catch
+        {
+            // ANSI/GBK（CodePages provider 已注册）
+            return Encoding.GetEncoding(0);
+        }
+    }
+
+    /// <summary>读取 hosts 行并返回检测到的编码（写入时复用，保证不破坏原编码）。</summary>
+    private static (string[] Lines, Encoding Enc) ReadHostsWithEncoding()
+    {
+        var enc = DetectHostsEncoding();
+        var lines = File.ReadAllLines(HostsPath, enc);
+        return (lines, enc);
+    }
 
     private static (bool Ok, string Msg) WriteHosts(List<(string Domain, string Ip, long Ms)> entries, Logger log)
     {
@@ -179,7 +213,19 @@ public static class GithubHosts
                 log.Info($"[GithubHosts] 已备份原始 hosts → {BackupPath}");
             }
 
-            var lines = File.Exists(HostsPath) ? File.ReadAllLines(HostsPath).ToList() : new List<string>();
+            Encoding enc;
+            List<string> lines;
+            if (File.Exists(HostsPath))
+            {
+                var (arr, detected) = ReadHostsWithEncoding();
+                lines = arr.ToList();
+                enc = detected;
+            }
+            else
+            {
+                lines = new List<string>();
+                enc = new UTF8Encoding(false);
+            }
 
             // 移除旧标记段（幂等重写）
             var inBlock = false;
@@ -195,8 +241,8 @@ public static class GithubHosts
                 lines.Add($"{ip}  {domain}");
             lines.Add(EndTag);
 
-            File.WriteAllLines(HostsPath, lines, new UTF8Encoding(false));
-            log.Info($"[GithubHosts] 已写入 {entries.Count} 条 hosts 条目");
+            File.WriteAllLines(HostsPath, lines, enc);
+            log.Info($"[GithubHosts] 已写入 {entries.Count} 条 hosts 条目 (enc={enc.EncodingName})");
             return (true, "ok");
         }
         catch (Exception ex)
@@ -208,8 +254,8 @@ public static class GithubHosts
 
     // ==================== DoH 解析 ====================
 
-    /// <summary>单个域名的解析+测速结果。</summary>
-    private sealed record OneResult(string Domain, (string Ip, long Ms)? Entry, string? Failed);
+    /// <summary>单个域名的解析+测速结果（Ip 为空 = 解析/测速失败，见 Failed）。</summary>
+    private sealed record OneResult(string Domain, string? Ip, long Ms, string? Failed);
 
     /// <summary>单个域名：DoH 多源解析 → TCP 443 测速选最优。每阶段回调实时进度。</summary>
     private static async Task<OneResult> ResolveOne(string domain, Logger log, Action<string, ProgressColor>? progress)
@@ -220,7 +266,7 @@ public static class GithubHosts
         {
             progress?.Invoke($"  ↳ 失败：DoH 全部源不可达，无真实 IP", ProgressColor.Fail);
             log.Info($"[GithubHosts] {domain}: DoH 源全部不可达");
-            return new OneResult(domain, null, $"{domain}(无DoH真值)");
+            return new OneResult(domain, null, 0, $"{domain}(无DoH真值)");
         }
 
         progress?.Invoke($"  ↳ DoH 候选: {string.Join(", ", ips)}", ProgressColor.Info);
@@ -229,12 +275,12 @@ public static class GithubHosts
         {
             progress?.Invoke($"  ↳ 失败：所有候选 IP TCP443 不可达", ProgressColor.Fail);
             log.Info($"[GithubHosts] {domain}: 所有候选 IP TCP443 不可达");
-            return new OneResult(domain, null, $"{domain}(无可达IP)");
+            return new OneResult(domain, null, 0, $"{domain}(无可达IP)");
         }
 
         progress?.Invoke($"  ↳ 选定 {best.Value.Ip}（{best.Value.Ms}ms）", ProgressColor.Success);
         log.Info($"[GithubHosts] {domain} → {best.Value.Ip} ({best.Value.Ms}ms)");
-        return new OneResult(domain, (best.Value.Ip, best.Value.Ms), null);
+        return new OneResult(domain, best.Value.Ip, best.Value.Ms, null);
     }
 
     /// <summary>从多个 DoH 源解析域名 A 记录，返回真实 IP 列表。viaDoh=false 表示全部源不可达。</summary>

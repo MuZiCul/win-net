@@ -32,6 +32,8 @@ internal static class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        // 注册代码页 provider：支持 GBK/936（hosts 中文注释、netsh 中文输出解码）
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
         if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v"))
         {
@@ -111,11 +113,20 @@ internal static class Program
         }
     }
 
-    /// <summary>修复 GitHub 连接：DoH 解析真实 IP 写入 hosts（绕过 DNS 污染）。</summary>
+    /// <summary>修复 GitHub 连接：先诊断（输出污染判定），再 DoH 解析真实 IP 写入 hosts。</summary>
     private static int GithubFix()
     {
         _log!.Info("[Github] 开始修复 GitHub 连接");
-        Console.WriteLine("正在诊断并修复 GitHub 连接...");
+        Console.WriteLine("正在诊断 GitHub 连接...");
+
+        // 先诊断：TCP 可达性 + DNS 污染比对
+        var diag = GithubHosts.Diagnose(_log!).GetAwaiter().GetResult();
+        Console.WriteLine($"  TCP443(本机IP): {(diag.GithubReachable ? "可达" : "不可达")}");
+        Console.WriteLine($"  本机解析: {string.Join(", ", diag.LocalIps)}");
+        Console.WriteLine($"  DoH真值: {string.Join(", ", diag.TrueIps)}");
+        Console.WriteLine($"  判定: {(diag.DnsPolluted ? "DNS 已污染 → 需要修复" : "未检测到污染 → 尝试修复")}");
+
+        Console.WriteLine("正在修复（DoH 解析真实 IP → TCP443 测速 → 写 hosts）...");
         var (ok, msg) = GithubHosts.Fix(_log!).GetAwaiter().GetResult();
         Console.WriteLine(ok ? "OK" : "失败");
         Console.WriteLine(msg);
