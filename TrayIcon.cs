@@ -20,6 +20,9 @@ public sealed class TrayIcon : IDisposable
     public const int CmdDisableEnable = 8;
     public const int CmdFixDns = 9;
     public const int CmdOpenLogDir = 10;
+    public const int CmdGithubFix = 11;
+    public const int CmdGithubRestore = 12;
+    public const int CmdAbout = 13;
 
     // ---- Shell_NotifyIcon ----
     private const uint NIM_ADD = 0x00000000;
@@ -357,7 +360,11 @@ public sealed class TrayIcon : IDisposable
             AppendMenu(menu, MF_STRING, new IntPtr(CmdFixDns), "修复 DNS");
             AppendMenu(menu, MF_STRING, new IntPtr(CmdOpenLogDir), "打开日志目录");
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
+            AppendMenu(menu, MF_STRING, new IntPtr(CmdGithubFix), "修复 GitHub 连接");
+            AppendMenu(menu, MF_STRING, new IntPtr(CmdGithubRestore), "还原 GitHub hosts");
+            AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, new IntPtr(CmdShowStatus), "显示状态");
+            AppendMenu(menu, MF_STRING, new IntPtr(CmdAbout), "关于");
             AppendMenu(menu, MF_STRING, new IntPtr(CmdUninstall), "卸载");
             AppendMenu(menu, MF_STRING, new IntPtr(CmdExit), "退出");
 

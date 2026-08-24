@@ -54,6 +54,8 @@
 | `--once` | 仅执行一次探测+修复（调试/排障用） |
 | `--config <path>` | 指定配置文件（默认 `%ProgramData%\WinNetFix\config.json`） |
 | `--status` | 打印当前状态机状态与最近日志 |
+| `--github-fix` | 修复 GitHub 连接（DoH 解析真实 IP 写入 hosts） |
+| `--github-restore` | 还原 hosts（移除 WinNetFix GitHub 条目） |
 | `--version` | 版本号 |
 
 ### 2.3 托盘菜单
@@ -68,11 +70,16 @@
 | 禁用并恢复网卡 | 动作 | PnP 设备级禁用→启用（重载驱动），需确认，PnP 不可用回退接口级 |
 | 修复 DNS | 动作 | flushdns → 仍不通切公共 DNS → 气泡反馈 |
 | 打开日志目录 | 动作 | 资源管理器打开 `exe目录\logs` |
+| 修复 GitHub 连接 | 动作 | DoH 解析真实 IP → TCP443 测速 → 写入 hosts（标记段） |
+| 还原 GitHub hosts | 动作 | 移除 WinNetFix GitHub 标记段 |
 | 显示状态 | 动作 | 气泡显示当前网络状态/IP |
+| 关于 | 动作 | 默认浏览器打开项目主页 |
 | 卸载 | 动作 | 移除自启 + 卸载程序/提示手动删 |
 | 退出 | 动作 | 结束常驻进程 |
 
-开关仅运行时生效（不写入 config.json）；手动动作在后台线程执行，执行期间自动修复让路（防并发操作网卡/DNS）。
+开关仅运行时生效（不写入 config.json）。
+
+**手动动作统一反馈**：所有动作类菜单项均在后台线程执行，执行期间自动修复让路（防并发操作网卡/DNS）；同时弹出**实时进度窗口**（`ProgressWindow`，纯 P/Invoke RichEdit 富文本）逐行显示过程，完成后弹详情框 + 托盘气泡。进度行按状态着色：绿色 `✔`=成功、红色 `✘`=失败、蓝色 `►`=候选/关键节点。
 
 ### 2.4 配置文件（`config.json`）
 ```json
@@ -360,6 +367,37 @@ netsh interface ip add dns name="以太网" 223.5.5.5 index=2
 - **仅改以太网 IPv4，不触碰 WiFi 的 DNS 配置**（避免影响已连无线）。
 - 配置项 `publicDns` 可自定义主/备 DNS 地址。
 - 若切 DNS 命令失败（权限/适配器异常）→ 进入 `Escalate`（错误码 E104）。
+
+### 5.6 GitHub 连接修复（DNS 污染专项）
+国内访问 GitHub 不稳定的主因是 **DNS 污染**（域名解析返回被污染 IP），通用 DNS 修复（flushdns/切公共 DNS）对其无效。本工具通过 **DoH 获取真实 IP 写入 hosts** 绕过污染：
+
+**诊断**（`GithubHosts.Diagnose`）：
+- TCP 443 连接 `github.com`（本机解析 IP）判断可达性
+- 本机 DNS 解析结果与 DoH 真值比对：不一致 = 污染
+
+**修复**（`GithubHosts.Fix`，`--github-fix` / 托盘"修复 GitHub 连接"）：
+1. 对核心域名清单（`github.com`、`api.github.com`、`raw.githubusercontent.com` 等 9 个）多源 DoH（阿里/阿里IP直连/Google）解析 A 记录
+2. 对候选 IP 做 TCP 443 测速，选最快可达 IP
+3. 写入 hosts 标记段（`# === WinNetFix GitHub Fix BEGIN/END ===`）
+4. 首次写入前自动备份原 hosts → `hosts.winnetfix.bak`
+
+**还原**（`GithubHosts.Restore`，`--github-restore` / 托盘"还原 GitHub hosts"）：删除标记段，不影响用户其他 hosts 内容。
+
+**设计要点**：
+- hosts 写入仅管理标记段内条目（幂等重写），不触碰用户自定义条目
+- 单个域名无可用 IP 时跳过（不写无效条目），全部失败则不修改 hosts
+- 域名解析超时 5s/源、测速超时 4s/IP，均有界不阻塞
+- 需要管理员权限（写 `%SystemRoot%\System32\drivers\etc\hosts`）
+
+### 5.7 实时进度窗口（ProgressWindow）
+所有手动操作（重启网卡/禁用恢复/修复 DNS/修复 GitHub/还原 hosts）的实时过程反馈：
+
+- **纯 P/Invoke 实现**：`CreateWindowEx` + RichEdit 控件（`RICHEDIT50W`，需先 `LoadLibrary("Msftedit.dll")`），消息循环复用托盘窗口的 `GetMessage` 循环（关闭进度窗口不退出托盘）。
+- **跨线程安全**：后台修复线程通过 `SendMessage(EM_SETSEL/EM_REPLACESEL)` 追加文本；`AppendLine(string, ProgressColor)` 支持按行着色（`EM_SETCHARFORMAT` + `CHARFORMAT2W`）。
+- **彩色符号**：`✔`=成功（绿）、`✘`=失败（红）、`►`=候选/关键节点（蓝），符号继承行颜色。
+- **生命周期**：由主线程创建、字段持有引用防 GC；用户手动关闭；窗口标题栏/任务栏显示 exe 彩色应用图标（`ExtractIconEx` + `WM_SETICON`）。
+- **回调协议**：各操作方法接受 `Action<string, ProgressColor>? progress` 逐阶段上报；`TrayApp.RunManualAction` 统一创建窗口 + 完成后 `NativeBox` 详情弹窗。
+- **关键约束**：进度窗口 `WM_DESTROY` 不 `PostQuitMessage`（否则会连带退出托盘消息循环）。
 
 ---
 

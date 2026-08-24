@@ -547,16 +547,23 @@ public sealed class StateMachine
     // ==================== 托盘手动操作入口 ====================
 
     /// <summary>手动重启网卡（接口级禁用→启用）。执行期间自动修复让路。返回是否执行成功。</summary>
-    public bool ManualRestartAdapter() => RunManual(() =>
+    public bool ManualRestartAdapter(Action<string, ProgressColor>? progress = null) => RunManual(() =>
     {
         var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
         if (adapter == null)
         {
             _log.Error("[Manual] 未找到以太网适配器，无法重启");
+            progress?.Invoke("未找到以太网适配器", ProgressColor.Fail);
             return false;
         }
+        progress?.Invoke($"重启网卡: {adapter.Name}", ProgressColor.Info);
+        progress?.Invoke("  禁用网卡…", ProgressColor.Default);
         if (!AdapterManager.RestartAdapter(adapter.Name, _log))
+        {
+            progress?.Invoke("  禁用/启用失败", ProgressColor.Fail);
             return false;
+        }
+        progress?.Invoke("  已启用，等待 DHCP 获取 IP…", ProgressColor.Info);
         LastFixTime = DateTime.Now;
         WaitForValidIp(adapter.Name);
         _log.Info($"[Manual] 网卡重启完成: {adapter.Name}");
@@ -565,18 +572,22 @@ public sealed class StateMachine
     });
 
     /// <summary>手动禁用并恢复网卡（PnP 设备级，重载驱动；PnP 不可用回退接口级）。返回是否执行成功。</summary>
-    public bool ManualDisableEnableAdapter() => RunManual(() =>
+    public bool ManualDisableEnableAdapter(Action<string, ProgressColor>? progress = null) => RunManual(() =>
     {
         var adapter = AdapterManager.FindEthernetAdapter(_config.Repair.AdapterMatch);
         if (adapter == null)
         {
             _log.Error("[Manual] 未找到以太网适配器，无法禁用/恢复");
+            progress?.Invoke("未找到以太网适配器", ProgressColor.Fail);
             return false;
         }
 
+        progress?.Invoke($"禁用并恢复网卡: {adapter.Name}", ProgressColor.Info);
+        progress?.Invoke("  查找 PnP 设备（驱动级）…", ProgressColor.Default);
         var pnpId = AdapterManager.GetWiredPnpDeviceId(adapter.Name, _log);
         if (pnpId != null && AdapterManager.RestartAdapterPnp(pnpId, _log))
         {
+            progress?.Invoke("  设备级禁用→启用完成，等待 DHCP…", ProgressColor.Success);
             LastFixTime = DateTime.Now;
             WaitForValidIp(adapter.Name);
             _log.Info($"[Manual] 网卡禁用/恢复完成(PnP): {adapter.Name}");
@@ -586,12 +597,14 @@ public sealed class StateMachine
 
         // PnP 不可用回退接口级
         _log.Warn("[Manual] PnP 禁用/恢复不可用，回退接口级重启");
-        return ManualRestartAdapter();
+        progress?.Invoke("  PnP 不可用，回退接口级重启", ProgressColor.Default);
+        return ManualRestartAdapter(progress);
     });
 
     /// <summary>手动修复 DNS：flushdns → 重探 → 仍不通则切公共 DNS → 重探。返回是否最终恢复正常。</summary>
-    public bool ManualFixDns() => RunManual(() =>
+    public bool ManualFixDns(Action<string, ProgressColor>? progress = null) => RunManual(() =>
     {
+        progress?.Invoke("刷新 DNS 缓存（flushdns）…", ProgressColor.Info);
         DnsManager.FlushDns(_log);
         Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.DnsWaitSec));
         var r = _probe.Probe();
@@ -599,6 +612,7 @@ public sealed class StateMachine
         if (r.AllOk)
         {
             _log.Info("[Manual] flushdns 后 DNS 恢复正常");
+            progress?.Invoke("flushdns 后 DNS 恢复正常", ProgressColor.Success);
             ResetFailCounters();
             return true;
         }
@@ -609,9 +623,11 @@ public sealed class StateMachine
             if (adapter == null)
             {
                 _log.Error("[Manual] 未找到以太网适配器，无法切 DNS");
+                progress?.Invoke("未找到以太网适配器，无法切 DNS", ProgressColor.Fail);
                 ResetFailCounters();
                 return false;
             }
+            progress?.Invoke("flushdns 无效，切换公共 DNS…", ProgressColor.Info);
             if (DnsManager.SetPublicDns(adapter.Name, _config.Repair.PublicDns, _log))
             {
                 Thread.Sleep(TimeSpan.FromSeconds(_config.Repair.DnsWaitSec));
@@ -620,15 +636,18 @@ public sealed class StateMachine
                 if (r2.AllOk)
                 {
                     _log.Info("[Manual] 切换公共 DNS 后恢复上网");
+                    progress?.Invoke("切换公共 DNS 后恢复上网", ProgressColor.Success);
                     ResetFailCounters();
                     return true;
                 }
                 _log.Warn("[Manual] 切换公共 DNS 后仍不通");
+                progress?.Invoke("切换公共 DNS 后仍不通", ProgressColor.Fail);
             }
         }
         else
         {
             _log.Warn("[Manual] DNS 修复后仍异常（链路或应用层问题，非 DNS 层）");
+            progress?.Invoke("DNS 修复后仍异常（链路或应用层问题）", ProgressColor.Fail);
         }
         ResetFailCounters();
         return false;

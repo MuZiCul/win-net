@@ -15,6 +15,7 @@ public sealed class TrayApp : IDisposable
     private readonly Task _workerTask;
     private StateMachine? _machine;
     private bool _exitStarted;
+    private ProgressWindow? _githubWin; // 持有引用防 GC，窗口由用户手动关闭
 
     public event Action? ExitRequested;
 
@@ -71,20 +72,29 @@ public sealed class TrayApp : IDisposable
                 ToggleAutoWifi();
                 break;
             case TrayIcon.CmdRestartAdapter:
-                RunManualAction("重启网卡", () => _machine!.ManualRestartAdapter());
+                RunManualAction("重启网卡", p => { var ok = _machine!.ManualRestartAdapter(p); return (ok, ok ? "网卡已重启" : "重启失败，详见日志"); });
                 break;
             case TrayIcon.CmdDisableEnable:
                 if (NativeBox.YesNo("确定禁用并恢复有线网卡吗？\n将执行设备级禁用→启用（重载驱动），期间会短暂断网。", "WinNetFix"))
-                    RunManualAction("禁用并恢复网卡", () => _machine!.ManualDisableEnableAdapter());
+                    RunManualAction("禁用并恢复网卡", p => { var ok = _machine!.ManualDisableEnableAdapter(p); return (ok, ok ? "网卡已禁用并恢复" : "操作失败，详见日志"); });
                 break;
             case TrayIcon.CmdFixDns:
-                RunManualAction("修复 DNS", () => _machine!.ManualFixDns());
+                RunManualAction("修复 DNS", p => { var ok = _machine!.ManualFixDns(p); return (ok, ok ? "DNS 已恢复正常" : "DNS 修复未完全恢复，详见日志"); });
                 break;
             case TrayIcon.CmdOpenLogDir:
                 OpenLogDir();
                 break;
+            case TrayIcon.CmdGithubFix:
+                RunGithubFix();
+                break;
+            case TrayIcon.CmdGithubRestore:
+                RunManualAction("还原 GitHub hosts", p => GithubHosts.Restore(_log, p));
+                break;
             case TrayIcon.CmdShowStatus:
                 ShowStatus();
+                break;
+            case TrayIcon.CmdAbout:
+                OpenAbout();
                 break;
             case TrayIcon.CmdUninstall:
                 Uninstall();
@@ -111,23 +121,75 @@ public sealed class TrayApp : IDisposable
         _log.Info($"[Tray] 自动连接 WiFi 开关 → {(_machine.IsAutoConnectWifi ? "开" : "关")}");
     }
 
-    /// <summary>在后台线程执行手动操作，前后用气泡反馈结果（不阻塞托盘消息循环）。</summary>
-    private void RunManualAction(string label, Func<bool> action)
+    /// <summary>
+    /// 后台执行手动操作：弹出实时进度窗口显示过程，完成后弹详情框 + 气泡。
+    /// 进度回调（文本+颜色）写入窗口；操作可返回详情消息。
+    /// </summary>
+    private void RunManualAction(string label, Func<Action<string, ProgressColor>?, (bool Ok, string Msg)> action)
     {
         _tray.ShowBalloon("WinNetFix", $"正在{label}…");
+        _githubWin?.Dispose(); // 关闭上一个遗留窗口
+        var win = new ProgressWindow($"WinNetFix - {label}");
+        _githubWin = win; // 持有引用防 GC；窗口由用户手动关闭
+        win.AppendLine($"开始{label}…");
         Task.Run(() =>
         {
             try
             {
-                var ok = action();
-                _tray.ShowBalloon("WinNetFix", $"{label}: {(ok ? "完成" : "失败，详见日志")}");
+                var (ok, msg) = action((t, c) => win.AppendLine(t, c));
+                NativeBox.Info(msg, ok ? $"{label}完成" : $"{label}失败");
+                _tray.ShowBalloon("WinNetFix", $"{label}: {(ok ? "完成" : "失败")}");
             }
             catch (Exception ex)
             {
                 _log.Error($"[Tray] {label}异常: {ex}");
-                _tray.ShowBalloon("WinNetFix", $"{label}异常: {ex.Message}");
+                win.AppendLine($"异常: {ex.Message}");
+                NativeBox.Error($"{label}异常: {ex.Message}");
             }
         });
+    }
+
+    /// <summary>修复 GitHub 连接：弹出实时进度窗口显示全过程，完成后弹详情框。</summary>
+    private void RunGithubFix()
+    {
+        _tray.ShowBalloon("WinNetFix", "正在修复 GitHub 连接…");
+        _githubWin?.Dispose(); // 关闭上一个遗留窗口
+        var win = new ProgressWindow("WinNetFix - 修复 GitHub 连接");
+        _githubWin = win; // 持有引用防 GC；窗口由用户手动关闭
+        Task.Run(async () =>
+        {
+            try
+            {
+                var (ok, msg) = await GithubHosts.Fix(_log, (t, c) => win.AppendLine(t, c));
+                NativeBox.Info(msg, ok ? "GitHub 修复完成" : "GitHub 修复失败");
+                _tray.ShowBalloon("WinNetFix", $"修复 GitHub 连接: {(ok ? "完成" : "失败")}");
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"[Tray] 修复 GitHub 连接异常: {ex}");
+                win.AppendLine($"异常: {ex.Message}");
+                NativeBox.Error($"修复 GitHub 连接异常: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>用默认浏览器打开项目主页。</summary>
+    private void OpenAbout()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "https://github.com/MuZiCul/win-net",
+                UseShellExecute = true,
+            });
+            _log.Info("[Tray] 打开关于页面");
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"[Tray] 打开关于页面失败: {ex.Message}");
+            NativeBox.Error($"打开关于页面失败: {ex.Message}");
+        }
     }
 
     /// <summary>用资源管理器打开日志目录（exe 目录/logs）。</summary>

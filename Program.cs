@@ -74,6 +74,8 @@ internal static class Program
             case "--run":
             case "--wifi-on":
             case "--wifi-off":
+            case "--github-fix":
+            case "--github-restore":
             default:
                 // 需要管理员权限的模式：非管理员时自动 UAC 提权重启
                 if (!IsAdministrator() && TryElevateSelf(args))
@@ -99,10 +101,35 @@ internal static class Program
                 return SetWifiRadio(on: true);
             case "--wifi-off":
                 return SetWifiRadio(on: false);
+            case "--github-fix":
+                return GithubFix();
+            case "--github-restore":
+                return GithubRestore();
             case "--run":
             default:
                 return RunBackground(configPath);
         }
+    }
+
+    /// <summary>修复 GitHub 连接：DoH 解析真实 IP 写入 hosts（绕过 DNS 污染）。</summary>
+    private static int GithubFix()
+    {
+        _log!.Info("[Github] 开始修复 GitHub 连接");
+        Console.WriteLine("正在诊断并修复 GitHub 连接...");
+        var (ok, msg) = GithubHosts.Fix(_log!).GetAwaiter().GetResult();
+        Console.WriteLine(ok ? "OK" : "失败");
+        Console.WriteLine(msg);
+        _log.Info($"[Github] 修复结果: {(ok ? "OK" : "失败")} {msg}");
+        return ok ? 0 : 1;
+    }
+
+    /// <summary>还原 hosts：移除 WinNetFix GitHub 修复条目。</summary>
+    private static int GithubRestore()
+    {
+        _log!.Info("[Github] 开始还原 hosts");
+        var (ok, msg) = GithubHosts.Restore(_log!);
+        Console.WriteLine(msg);
+        return ok ? 0 : 1;
     }
 
     /// <summary>手动打开/关闭 WiFi 软件开关（供测试与后续功能预留）。</summary>

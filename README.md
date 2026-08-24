@@ -17,7 +17,9 @@
 - **防抖防死循环**：重启网卡后等待 DHCP 完成（20s）再确认；连续失败进入长冷却（30 分钟）；多次仍失败则**停手 30 分钟后再主动重启网卡重试**，直到恢复（非永久停手）。
 - **应用层故障不误修**：链路/DNS 正常但 HTTP 被拦（SSL/防火墙）时不做无意义重启，仅记录观察。
 - **UAC 自动提权**：需要管理员权限时自动弹窗提权重启，无需手动右键。
-- **托盘菜单（手动控制）**：右键托盘图标可——开关**自动执行修复**（只监视不干预）、开关**自动连接 WiFi**、**重启网卡**、**禁用并恢复网卡**（PnP 设备级，重载驱动）、**修复 DNS**、**打开日志目录**。
+- **托盘菜单（手动控制）**：右键托盘图标可——开关**自动执行修复**（只监视不干预）、开关**自动连接 WiFi**、**重启网卡**、**禁用并恢复网卡**（PnP 设备级，重载驱动）、**修复 DNS**、**打开日志目录**、**修复 GitHub 连接**、**还原 GitHub hosts**、**关于**。
+- **GitHub 连接修复**：诊断 DNS 污染（本机解析与 DoH 真值比对），通过多源 DoH（阿里/Google）并行解析 GitHub 真实 IP，TCP 443 测速选最优后写入 hosts（标记段管理，可一键还原，首次写入自动备份）。
+- **实时进度窗口**：所有手动操作（重启网卡/禁用恢复/修复 DNS/修复 GitHub/还原 hosts）均弹出**彩色富文本进度窗口**实时显示过程，完成后弹详情框；绿色 ✔=成功、红色 ✘=失败、蓝色 ►=候选/关键节点。
 
 ### 构建
 
@@ -62,6 +64,11 @@ WinNetFix.exe --status
 # 手动打开/关闭 WiFi 软件开关 / Manually turn WiFi radio on/off
 WinNetFix.exe --wifi-on
 WinNetFix.exe --wifi-off
+
+# 修复 GitHub 连接（DoH 解析真实 IP 写入 hosts）/ Fix GitHub connectivity via hosts
+WinNetFix.exe --github-fix
+# 还原 hosts（移除 WinNetFix GitHub 条目）/ Restore hosts
+WinNetFix.exe --github-restore
 ```
 
 ### 开机自启 / Auto-start on boot
@@ -154,7 +161,9 @@ A background, zero-dependency, low-footprint Windows network self-heal tool. Pri
 - **Anti-thrash & stop guard**: waits for DHCP (20s) before confirming recovery; after repeated failures enters a long cooldown (30 min); on persistent failure pauses for 30 min, then **actively restarts the adapter and retries** until recovered (not a permanent stop).
 - **No false repair on app-layer faults**: when link/DNS are fine but HTTP is blocked (SSL/firewall), no pointless restart; only logs.
 - **Auto UAC elevation**: auto restarts with admin rights when needed.
-- **Tray menu (manual control)**: right-click the tray icon to toggle **auto repair** (monitor-only), toggle **auto WiFi connect**, **restart adapter**, **disable & re-enable adapter** (PnP device level, reloads driver), **fix DNS**, and **open log folder**.
+- **Tray menu (manual control)**: right-click the tray icon to toggle **auto repair** (monitor-only), toggle **auto WiFi connect**, **restart adapter**, **disable & re-enable adapter** (PnP device level, reloads driver), **fix DNS**, **open log folder**, **fix GitHub connectivity**, **restore GitHub hosts**, **About**.
+- **GitHub connectivity fix**: detects DNS pollution (compares local resolution vs DoH truth), resolves real GitHub IPs via multi-source DoH (AliDNS/Google) in parallel, picks the fastest via TCP 443 speed test, then writes to hosts (tagged block, one-click restore, auto-backup on first write).
+- **Live progress window**: every manual operation opens a **colored rich-text progress window** showing each step in real time, then a summary dialog; green ✔=success, red ✘=failure, blue ►=candidates/key steps.
 
 ### Build
 
@@ -182,6 +191,8 @@ WinNetFix.exe --once         # run one detect+repair cycle
 WinNetFix.exe --status       # show network status (read-only, no elevation)
 WinNetFix.exe --wifi-on      # turn WiFi radio on
 WinNetFix.exe --wifi-off     # turn WiFi radio off
+WinNetFix.exe --github-fix   # fix GitHub connectivity (write real IPs to hosts)
+WinNetFix.exe --github-restore  # restore hosts (remove WinNetFix GitHub entries)
 ```
 
 ### Auto-start on boot
